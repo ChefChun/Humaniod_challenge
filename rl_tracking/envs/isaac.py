@@ -85,7 +85,6 @@ class IsaacFrankaTrackingEnv(gym.Env):
         )
 
         import rclpy
-        from rclpy.node import Node
         from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
         from sensor_msgs.msg import JointState
 
@@ -112,18 +111,13 @@ class IsaacFrankaTrackingEnv(gym.Env):
 
         self.q: np.ndarray | None = None
         self.qd = np.zeros(7, dtype=float)
-        self._joint_msg_count = 0
-        self._last_joint_names: list[str] = []
         self.prev_command = np.zeros(7, dtype=float)
         self.step_count = 0
         self.t = 0.0
         self.trajectory_cfg = TrajectoryConfig(kind=config.trajectory)
-        self._last_info: dict = {}
         self._wait_for_joint_state()
 
     def _joint_state_cb(self, msg) -> None:
-        self._joint_msg_count += 1
-        self._last_joint_names = list(msg.name)
         positions = dict(zip(msg.name, msg.position))
         velocities = dict(zip(msg.name, msg.velocity)) if msg.velocity else {}
         if not all(name in positions for name in PANDA_JOINT_NAMES):
@@ -150,8 +144,6 @@ class IsaacFrankaTrackingEnv(gym.Env):
                         f"Check that Isaac Sim publishes {self.config.joint_states_topic} "
                         f"with joints {PANDA_JOINT_NAMES}. "
                         f"ROS topics visible to this node: {topic_names}. "
-                        f"JointState messages received on this subscription: {self._joint_msg_count}. "
-                        f"Last joint names seen: {self._last_joint_names}."
                     )
 
     def _publish_position_command(self, q_desired: np.ndarray, qd_desired: np.ndarray | None = None) -> None:
@@ -207,7 +199,6 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self._publish_position_command(reset_q, np.zeros(7))
         self._spin_for(self.config.reset_duration)
         self._wait_for_joint_state()
-        self._last_info = {}
         return self._observe(), {}
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
@@ -261,7 +252,6 @@ class IsaacFrankaTrackingEnv(gym.Env):
             "command": command,
             "is_success": error < 0.035,
         }
-        self._last_info = info
         return self._observe(), float(reward), terminated, truncated, info
 
     def close(self) -> None:
