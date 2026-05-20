@@ -1,0 +1,15 @@
+{
+  "dt": 0.08,
+  "horizon": 180,
+  "trajectory": "figure8",
+  "obs_noise": 0.001,
+  "action_noise": 0.01,
+  "residual_scale": 0.35,
+  "max_joint_speed": 0.8,
+  "controller_topic": "/isaac_joint_commands",
+  "joint_states_topic": "/isaac_joint_states",
+  "reset_duration": 2.0,
+  "command_duration": 0.12,
+  "settle_timeout": 20.0,
+  "seed": 7
+}
