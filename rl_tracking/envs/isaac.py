@@ -91,7 +91,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
 
         self._rclpy = rclpy
         self._JointState = JointState
-        self._node: Node = rclpy.create_node(f"isaac_franka_tracking_env_{id(self)}")
+        self._node = rclpy.create_node(f"isaac_franka_tracking_env_{id(self)}")
         qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
@@ -133,33 +133,36 @@ class IsaacFrankaTrackingEnv(gym.Env):
 
     def _spin_for(self, duration: float) -> None:
         deadline = time.time() + duration
-        while time.time() < deadline:
-            self._rclpy.spin_once(self._node, timeout_sec=0.01)
+        if self._node is not None:
+            while time.time() < deadline:
+                self._rclpy.spin_once(self._node, timeout_sec=0.01)
 
     def _wait_for_joint_state(self) -> None:
         start = time.time()
-        while self.q is None:
-            self._rclpy.spin_once(self._node, timeout_sec=0.1)
-            if time.time() - start > self.config.settle_timeout:
-                topics = self._node.get_topic_names_and_types()
-                topic_names = sorted(name for name, _ in topics)
-                raise RuntimeError(
-                    "Timed out waiting for Franka joint states. "
-                    f"Check that Isaac Sim publishes {self.config.joint_states_topic} "
-                    f"with joints {PANDA_JOINT_NAMES}. "
-                    f"ROS topics visible to this node: {topic_names}. "
-                    f"JointState messages received on this subscription: {self._joint_msg_count}. "
-                    f"Last joint names seen: {self._last_joint_names}."
-                )
+        if self._node is not None:
+            while self.q is None:
+                self._rclpy.spin_once(self._node, timeout_sec=0.1)
+                if time.time() - start > self.config.settle_timeout:
+                    topics = self._node.get_topic_names_and_types()
+                    topic_names = sorted(name for name, _ in topics)
+                    raise RuntimeError(
+                        "Timed out waiting for Franka joint states. "
+                        f"Check that Isaac Sim publishes {self.config.joint_states_topic} "
+                        f"with joints {PANDA_JOINT_NAMES}. "
+                        f"ROS topics visible to this node: {topic_names}. "
+                        f"JointState messages received on this subscription: {self._joint_msg_count}. "
+                        f"Last joint names seen: {self._last_joint_names}."
+                    )
 
     def _publish_position_command(self, q_desired: np.ndarray, qd_desired: np.ndarray | None = None) -> None:
-        command = self._JointState()
-        command.header.stamp = self._node.get_clock().now().to_msg()
-        command.name = PANDA_JOINT_NAMES
-        command.position = np.clip(q_desired, PANDA_Q_MIN, PANDA_Q_MAX).tolist()
-        if qd_desired is not None:
-            command.velocity = np.asarray(qd_desired, dtype=float).tolist()
-        self._command_pub.publish(command)
+        if self._node is not None:
+            command = self._JointState()
+            command.header.stamp = self._node.get_clock().now().to_msg()
+            command.name = PANDA_JOINT_NAMES
+            command.position = np.clip(q_desired, PANDA_Q_MIN, PANDA_Q_MAX).tolist()
+            if qd_desired is not None:
+                command.velocity = np.asarray(qd_desired, dtype=float).tolist()
+            self._command_pub.publish(command)
 
     def _target(self) -> tuple[np.ndarray, np.ndarray, float]:
         return target_at(self.t, self.trajectory_cfg)
@@ -262,6 +265,6 @@ class IsaacFrankaTrackingEnv(gym.Env):
         return self._observe(), float(reward), terminated, truncated, info
 
     def close(self) -> None:
-        if hasattr(self, "_node") and self._node is not None:
+        if self._node is not None:
             self._node.destroy_node()
             self._node = None
