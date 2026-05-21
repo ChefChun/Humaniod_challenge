@@ -6,8 +6,8 @@ import numpy as np
 import torch
 
 from ..algorithms.sac import TorchSACAgent
-from ..core.control import acceleration_residual_command, integrate_joint_acceleration
-from ..core.kinematics import PANDA_JOINT_NAMES, damped_velocity_ik, forward_kinematics
+from ..core.control import integrate_joint_acceleration, policy_acceleration_command
+from ..core.kinematics import PANDA_JOINT_NAMES, forward_kinematics
 from ..core.trajectories import TrajectoryConfig, target_at
 from ..envs.isaac import make_observation
 
@@ -37,10 +37,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--controller-topic", default="/isaac_joint_commands")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
     parser.add_argument("--dt", type=float, default=0.08)
-    parser.add_argument("--trajectory", choices=["circle", "figure8", "vertical8"])
+    parser.add_argument("--trajectory", choices=["circle", "figure8", "horizontal8"])
     parser.add_argument("--max-joint-speed", type=float)
     parser.add_argument("--max-joint-accel", type=float)
     parser.add_argument("--max-joint-jerk", type=float)
+    parser.add_argument("--action-accel-scale", type=float)
     parser.add_argument("--residual-scale", type=float)
     return parser.parse_args()
 
@@ -71,7 +72,11 @@ def main() -> None:
     max_joint_speed = args.max_joint_speed if args.max_joint_speed is not None else float(env_config.get("max_joint_speed", 0.8))
     max_joint_accel = args.max_joint_accel if args.max_joint_accel is not None else float(env_config.get("max_joint_accel", 2.5))
     max_joint_jerk = args.max_joint_jerk if args.max_joint_jerk is not None else float(env_config.get("max_joint_jerk", 18.0))
-    residual_scale = args.residual_scale if args.residual_scale is not None else float(env_config.get("residual_scale", 0.35))
+    action_accel_scale = args.action_accel_scale
+    if action_accel_scale is None:
+        action_accel_scale = args.residual_scale
+    if action_accel_scale is None:
+        action_accel_scale = float(env_config.get("action_accel_scale", env_config.get("residual_scale", 1.0)))
 
     class TrackerNode(Node):
         def __init__(self) -> None:
@@ -117,20 +122,11 @@ def main() -> None:
                 prev_action_scale=max_joint_accel,
             ).astype(np.float32)
             residual = policy.predict(obs)
-            # Deployment mirrors IsaacFrankaTrackingEnv.step: residual action means acceleration.
-            base_velocity = damped_velocity_ik(
-                self.q,
-                target_pos - ee_pos,
-                target_vel,
-                max_joint_speed=max_joint_speed,
-            )
-            desired_acceleration, _, _ = acceleration_residual_command(
-                base_velocity,
-                self.command_velocity,
+            # Deployment mirrors IsaacFrankaTrackingEnv.step: SAC action is the main acceleration command.
+            desired_acceleration = policy_acceleration_command(
                 residual,
-                args.dt,
                 max_joint_accel,
-                residual_scale,
+                action_accel_scale,
             )
             desired_q, command_velocity, acceleration, _ = integrate_joint_acceleration(
                 self.q,

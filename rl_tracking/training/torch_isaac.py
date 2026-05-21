@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-dir", default="runs/torch_isaac")
     parser.add_argument("--save-freq", type=int, default=10_000)
     parser.add_argument("--log-freq", type=int, default=100)
-    parser.add_argument("--trajectory", choices=["circle", "figure8", "vertical8"], default="figure8")
+    parser.add_argument("--trajectory", choices=["circle", "figure8", "horizontal8"], default="figure8")
     parser.add_argument("--controller-topic", default="/isaac_joint_commands")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
     parser.add_argument("--dt", type=float, default=0.08)
@@ -29,7 +29,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-joint-speed", type=float, default=0.8)
     parser.add_argument("--max-joint-accel", type=float, default=2.5)
     parser.add_argument("--max-joint-jerk", type=float, default=18.0)
-    parser.add_argument("--residual-scale", type=float, default=0.35)
+    parser.add_argument("--action-accel-scale", type=float, default=1.0)
+    parser.add_argument("--residual-scale", type=float)
     parser.add_argument("--curriculum-switch-min-episodes", type=int, default=5)
     parser.add_argument("--curriculum-switch-window", type=int, default=5)
     parser.add_argument("--curriculum-switch-trajectory-error", type=float, default=0.045)
@@ -74,7 +75,7 @@ def main() -> None:
         trajectory=args.trajectory,
         obs_noise=args.obs_noise,
         action_noise=args.action_noise,
-        residual_scale=args.residual_scale,
+        action_accel_scale=args.action_accel_scale if args.residual_scale is None else args.residual_scale,
         max_joint_speed=args.max_joint_speed,
         max_joint_accel=args.max_joint_accel,
         max_joint_jerk=args.max_joint_jerk,
@@ -129,6 +130,8 @@ def main() -> None:
                 "timed_error",
                 "trajectory_error",
                 "velocity_toward_path",
+                "velocity_reward",
+                "position_reward",
                 "smoothness",
                 "jerk_norm",
                 "command_velocity_norm",
@@ -147,10 +150,11 @@ def main() -> None:
             print(f"controller_topic: {env_config.controller_topic}")
             print(f"joint_states_topic: {env_config.joint_states_topic}")
             print(
-                "control: acceleration residuals "
+                "control: RL acceleration policy "
                 f"max_speed={env_config.max_joint_speed} "
                 f"max_accel={env_config.max_joint_accel} "
-                f"max_jerk={env_config.max_joint_jerk}"
+                f"max_jerk={env_config.max_joint_jerk} "
+                f"action_scale={env_config.action_accel_scale}"
             )
             print(
                 "reward curriculum: trajectory-path reward first, timed target reward after "
@@ -186,6 +190,8 @@ def main() -> None:
                     writer.add_scalar("tracking/timed_error_m", info.get("timed_error", 0.0), step)
                     writer.add_scalar("tracking/trajectory_error_m", info.get("trajectory_error", 0.0), step)
                     writer.add_scalar("tracking/velocity_toward_path", info.get("velocity_toward_path", 0.0), step)
+                    writer.add_scalar("reward/velocity", info.get("velocity_reward", 0.0), step)
+                    writer.add_scalar("reward/position", info.get("position_reward", 0.0), step)
                     writer.add_scalar("tracking/smoothness", info.get("smoothness", 0.0), step)
                     writer.add_scalar("tracking/jerk_norm", info.get("jerk_norm", 0.0), step)
                     # Control norms reveal saturation even when reward still appears to improve.
@@ -214,6 +220,8 @@ def main() -> None:
                         "timed_error": info.get("timed_error", 0.0),
                         "trajectory_error": info.get("trajectory_error", 0.0),
                         "velocity_toward_path": info.get("velocity_toward_path", 0.0),
+                        "velocity_reward": info.get("velocity_reward", 0.0),
+                        "position_reward": info.get("position_reward", 0.0),
                         "smoothness": info.get("smoothness", 0.0),
                         "jerk_norm": info.get("jerk_norm", 0.0),
                         "command_velocity_norm": float(np.linalg.norm(info.get("command_velocity", np.zeros(7)))),

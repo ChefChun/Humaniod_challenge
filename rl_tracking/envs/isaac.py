@@ -5,7 +5,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from ..core.control import acceleration_residual_command, integrate_joint_acceleration
+from ..core.control import integrate_joint_acceleration, policy_acceleration_command
 from ..core.kinematics import (
     PANDA_JOINT_NAMES,
     PANDA_Q_HOME,
@@ -24,7 +24,7 @@ from ..core.trajectories import TrajectoryConfig, closest_target_on_trajectory, 
 # 2. _joint_state_cb stores those joint positions/velocities in self.q and self.qd.
 # 3. make_observation packs robot state, target state, tracking error, and previous acceleration.
 # 4. SAC reads that observation and outputs a normalized 7D action.
-# 5. step() treats that action as joint acceleration residuals, integrates to velocity/position,
+# 5. step() treats that action as the main joint acceleration command, integrates to velocity/position,
 #    then publishes /isaac_joint_commands back to Isaac Sim.
 def make_observation(
     q: np.ndarray,
@@ -68,7 +68,7 @@ class IsaacEnvConfig:
     trajectory: str = "figure8"
     obs_noise: float = 0.001
     action_noise: float = 0.01
-    residual_scale: float = 0.35
+    action_accel_scale: float = 1.0
     max_joint_speed: float = 0.8
     max_joint_accel: float = 2.5
     max_joint_jerk: float = 18.0
@@ -265,21 +265,17 @@ class IsaacFrankaTrackingEnv(gym.Env):
         else:
             target_pos, target_vel, _ = self._target()
         error_vec = target_pos - ee_pos
-        # Kinematics converts current joints to an EE position; IK asks "what joint velocity
-        # would reduce the Cartesian target error?" SAC then learns acceleration residuals on top.
-        base_velocity = damped_velocity_ik(
+        # IK is diagnostic/reference only on this branch; SAC supplies the actual acceleration command.
+        reference_velocity = damped_velocity_ik(
             self.q,
             error_vec,
             target_vel,
             max_joint_speed=self.config.max_joint_speed,
         )
-        desired_acceleration, base_acceleration, residual_acceleration = acceleration_residual_command(
-            base_velocity,
-            self.command_velocity,
+        desired_acceleration = policy_acceleration_command(
             action,
-            self.config.dt,
             self.config.max_joint_accel,
-            self.config.residual_scale,
+            self.config.action_accel_scale,
         )
         # The command sent to Isaac is still JointState(position, velocity); acceleration is
         # an internal control signal integrated over dt to get those publishable quantities.
@@ -324,9 +320,9 @@ class IsaacFrankaTrackingEnv(gym.Env):
             velocity_along_trajectory = float(np.dot(ee_velocity, closest_target_vel / tangent_norm)) if tangent_norm > 1e-6 else 0.0
             velocity_reward = (
                 0.8 * float(np.clip(velocity_toward_path, -0.3, 0.3))
-                + 0.9 * float(np.clip(velocity_along_trajectory, -0.3, 0.3))
+                + 1.4 * float(np.clip(velocity_along_trajectory, -0.3, 0.3))
             )
-            position_reward = -7.0 * error + 0.35 * float(np.exp(-45.0 * error))
+            position_reward = -6.0 * error + 0.30 * float(np.exp(-45.0 * error))
         else:
             reward_target_pos = next_target_pos
             reward_target_vel = next_target_vel
@@ -334,8 +330,8 @@ class IsaacFrankaTrackingEnv(gym.Env):
             velocity_error = float(np.linalg.norm(ee_velocity - next_target_vel))
             velocity_toward_path = 0.0
             velocity_along_trajectory = 0.0
-            velocity_reward = -0.35 * velocity_error
-            position_reward = -8.0 * error + 0.40 * float(np.exp(-35.0 * error))
+            velocity_reward = -1.2 * velocity_error + 0.25 * float(np.exp(-8.0 * velocity_error))
+            position_reward = -7.0 * error + 0.45 * float(np.exp(-35.0 * error))
 
         smoothness = float(np.linalg.norm(acceleration_delta))
         jerk_norm = smoothness / self.config.dt
@@ -368,12 +364,12 @@ class IsaacFrankaTrackingEnv(gym.Env):
             "trajectory_error": trajectory_error,
             "velocity_toward_path": velocity_toward_path,
             "velocity_along_trajectory": velocity_along_trajectory,
+            "velocity_reward": velocity_reward,
+            "position_reward": position_reward,
             "ee_velocity": ee_velocity,
             "smoothness": smoothness,
             "jerk_norm": jerk_norm,
-            "base_velocity": base_velocity,
-            "base_acceleration": base_acceleration,
-            "residual_acceleration": residual_acceleration,
+            "reference_velocity": reference_velocity,
             "acceleration": acceleration,
             "command_velocity": command_velocity,
             "command": command_velocity,

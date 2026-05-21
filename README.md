@@ -5,7 +5,7 @@ This folder contains a focused SAC baseline for training a Franka arm in Isaac S
 - Franka 7-DoF arm driven through Isaac ROS2 topics
 - Time-varying Cartesian targets: circle, figure-eight, or larger vertical figure-eight
 - Reinforcement learning core: custom PyTorch SAC
-- Smooth control: residual joint-acceleration policy on top of damped velocity IK
+- Smooth control: learned joint-acceleration policy with velocity, acceleration, and jerk limits
 - Uncertainty: observation and action noise
 - Metrics: tracking error, command smoothness, and success flag logged to TensorBoard
 
@@ -38,7 +38,7 @@ To train on the larger vertical figure-eight:
 
 ```bash
 python -m rl_tracking.training.torch_isaac \
-  --trajectory vertical8 \
+  --trajectory horizontal8 \
   --total-timesteps 200000
 ```
 
@@ -59,7 +59,7 @@ runs/torch_isaac/final_model.pt
 ```
 
 The PyTorch trainer owns the actor, twin critics, target critics, replay buffer, entropy temperature, and update loop.
-The SAC actor outputs normalized joint acceleration residuals. The controller clips acceleration, applies a jerk limit, integrates to joint velocity and joint position, then publishes a `sensor_msgs/msg/JointState` command.
+The SAC actor outputs normalized joint acceleration commands. The controller clips acceleration, applies a jerk limit, integrates to joint velocity and joint position, then publishes a `sensor_msgs/msg/JointState` command.
 
 ## Visualize Training
 
@@ -118,7 +118,7 @@ python -m rl_tracking.nodes.trajectory_visualizer --trajectory figure8 --frame-i
 For the larger vertical figure-eight:
 
 ```bash
-python -m rl_tracking.nodes.trajectory_visualizer --trajectory vertical8 --frame-id world
+python -m rl_tracking.nodes.trajectory_visualizer --trajectory horizontal8 --frame-id world
 ```
 
 The marker topic is:

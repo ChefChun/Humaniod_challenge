@@ -3,28 +3,13 @@ import numpy as np
 from .kinematics import PANDA_Q_MAX, PANDA_Q_MIN
 
 
-# This file converts policy intent into robot-friendly joint commands.
-# SAC outputs normalized acceleration residuals, but Isaac's command topic receives
-# joint positions and velocities, so acceleration must be limited and integrated first.
-def acceleration_residual_command(
-    base_velocity: np.ndarray,
-    command_velocity: np.ndarray,
+def policy_acceleration_command(
     action: np.ndarray,
-    dt: float,
     max_joint_accel: float,
-    residual_scale: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Convert a normalized SAC action into a joint acceleration target."""
-    # The IK controller proposes a velocity; SAC learns how quickly to move toward it.
-    base_acceleration = (np.asarray(base_velocity, dtype=float) - command_velocity) / dt
-    base_acceleration = np.clip(base_acceleration, -max_joint_accel, max_joint_accel)
-    residual_acceleration = residual_scale * max_joint_accel * np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
-    desired_acceleration = np.clip(
-        base_acceleration + residual_acceleration,
-        -max_joint_accel,
-        max_joint_accel,
-    )
-    return desired_acceleration, base_acceleration, residual_acceleration
+    action_scale: float,
+) -> np.ndarray:
+    """Convert the normalized SAC action into the commanded joint acceleration."""
+    return np.clip(action_scale * max_joint_accel * np.clip(np.asarray(action, dtype=float), -1.0, 1.0), -max_joint_accel, max_joint_accel)
 
 
 def integrate_joint_acceleration(
