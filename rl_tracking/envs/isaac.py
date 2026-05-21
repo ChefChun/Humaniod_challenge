@@ -14,8 +14,9 @@ from ..core.kinematics import (
     damped_velocity_ik,
     forward_kinematics,
     joint_limit_cost,
+    numerical_jacobian,
 )
-from ..core.trajectories import TrajectoryConfig, target_at
+from ..core.trajectories import TrajectoryConfig, closest_target_on_trajectory, target_at
 
 
 # Training-time data flow:
@@ -71,6 +72,7 @@ class IsaacEnvConfig:
     max_joint_speed: float = 0.8
     max_joint_accel: float = 2.5
     max_joint_jerk: float = 18.0
+    trajectory_projection_samples: int = 180
     controller_topic: str = "/isaac_joint_commands"
     joint_states_topic: str = "/isaac_joint_states"
     reset_duration: float = 2.0
@@ -128,6 +130,8 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.qd = np.zeros(7, dtype=float)
         self.command_velocity = np.zeros(7, dtype=float)
         self.prev_acceleration = np.zeros(7, dtype=float)
+        self.reward_mode = "trajectory"
+        self.tracking_start_time: float | None = None
         self.step_count = 0
         self.t = 0.0
         self.trajectory_cfg = TrajectoryConfig(kind=config.trajectory)
@@ -174,8 +178,23 @@ class IsaacFrankaTrackingEnv(gym.Env):
                 command.velocity = np.asarray(qd_desired, dtype=float).tolist()
             self._command_pub.publish(command)
 
+    def _target_time(self) -> float:
+        # Strict tracking starts its own trajectory clock when the trainer switches modes.
+        if self.reward_mode == "timed" and self.tracking_start_time is not None:
+            return max(0.0, self.t - self.tracking_start_time)
+        return self.t
+
     def _target(self) -> tuple[np.ndarray, np.ndarray, float]:
-        return target_at(self.t, self.trajectory_cfg)
+        return target_at(self._target_time(), self.trajectory_cfg)
+
+    def set_reward_mode(self, mode: str) -> None:
+        if mode not in {"trajectory", "timed"}:
+            raise ValueError(f"Unknown reward mode: {mode}")
+        if self.reward_mode != mode and mode == "timed":
+            self.tracking_start_time = self.t
+        elif mode == "trajectory":
+            self.tracking_start_time = None
+        self.reward_mode = mode
 
     def _ee_position(self) -> np.ndarray:
         assert self.q is not None
@@ -183,12 +202,20 @@ class IsaacFrankaTrackingEnv(gym.Env):
 
     def _observe(self) -> np.ndarray:
         assert self.q is not None
-        target_pos, target_vel, phase = self._target()
+        ee_pos = self._ee_position()
+        if self.reward_mode == "trajectory":
+            target_pos, target_vel, phase, _ = closest_target_on_trajectory(
+                ee_pos,
+                self.trajectory_cfg,
+                samples=self.config.trajectory_projection_samples,
+            )
+        else:
+            target_pos, target_vel, phase = self._target()
         obs = make_observation(
             self.q,
             self.qd,
             self.prev_acceleration,
-            self._ee_position(),
+            ee_pos,
             target_pos,
             target_vel,
             phase,
@@ -212,6 +239,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.t = 0.0
         self.command_velocity = np.zeros(7, dtype=float)
         self.prev_acceleration = np.zeros(7, dtype=float)
+        self.tracking_start_time = 0.0 if self.reward_mode == "timed" else None
         self.trajectory_cfg = TrajectoryConfig(kind=self.config.trajectory)
 
         random_offset = self.rng.normal(0.0, 0.025, size=7)
@@ -227,8 +255,15 @@ class IsaacFrankaTrackingEnv(gym.Env):
         if self.config.action_noise > 0.0:
             action = np.clip(action + self.rng.normal(0.0, self.config.action_noise, size=7), -1.0, 1.0)
 
-        target_pos, target_vel, _ = self._target()
         ee_pos = self._ee_position()
+        if self.reward_mode == "trajectory":
+            target_pos, target_vel, _, _ = closest_target_on_trajectory(
+                ee_pos,
+                self.trajectory_cfg,
+                samples=self.config.trajectory_projection_samples,
+            )
+        else:
+            target_pos, target_vel, _ = self._target()
         error_vec = target_pos - ee_pos
         # Kinematics converts current joints to an EE position; IK asks "what joint velocity
         # would reduce the Cartesian target error?" SAC then learns acceleration residuals on top.
@@ -265,21 +300,57 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.t += self.config.dt
         self.step_count += 1
 
-        next_target_pos, _, _ = self._target()
         ee_after = self._ee_position()
-        error = float(np.linalg.norm(next_target_pos - ee_after))
+        closest_target_pos, closest_target_vel, _, trajectory_error = closest_target_on_trajectory(
+            ee_after,
+            self.trajectory_cfg,
+            samples=self.config.trajectory_projection_samples,
+        )
+        ee_velocity = numerical_jacobian(self.q) @ self.qd
+
+        next_target_pos, next_target_vel, _ = self._target()
+
+        if self.reward_mode == "trajectory":
+            reward_target_pos = closest_target_pos
+            reward_target_vel = closest_target_vel
+            error = trajectory_error
+            to_path = closest_target_pos - ee_after
+            to_path_norm = float(np.linalg.norm(to_path))
+            if to_path_norm > 1e-6:
+                velocity_toward_path = float(np.dot(ee_velocity, to_path / to_path_norm))
+            else:
+                velocity_toward_path = 0.0
+            tangent_norm = float(np.linalg.norm(closest_target_vel))
+            velocity_along_trajectory = float(np.dot(ee_velocity, closest_target_vel / tangent_norm)) if tangent_norm > 1e-6 else 0.0
+            velocity_reward = (
+                0.8 * float(np.clip(velocity_toward_path, -0.3, 0.3))
+                + 0.9 * float(np.clip(velocity_along_trajectory, -0.3, 0.3))
+            )
+            position_reward = -7.0 * error + 0.35 * float(np.exp(-45.0 * error))
+        else:
+            reward_target_pos = next_target_pos
+            reward_target_vel = next_target_vel
+            error = float(np.linalg.norm(next_target_pos - ee_after))
+            velocity_error = float(np.linalg.norm(ee_velocity - next_target_vel))
+            velocity_toward_path = 0.0
+            velocity_along_trajectory = 0.0
+            velocity_reward = -0.35 * velocity_error
+            position_reward = -8.0 * error + 0.40 * float(np.exp(-35.0 * error))
+
         smoothness = float(np.linalg.norm(acceleration_delta))
         jerk_norm = smoothness / self.config.dt
         limit_penalty = joint_limit_cost(self.q)
 
-        # Reward trades Cartesian tracking against high speed, high acceleration, jerk, and joint-limit pressure.
+        # Two-phase reward:
+        # trajectory mode: stay near the geometric path and move along its tangent;
+        # timed mode: after trainer-level curriculum switch, follow the time-indexed target.
         reward = (
-            -8.0 * error
+            position_reward
+            + velocity_reward
             - 0.01 * float(np.dot(command_velocity, command_velocity))
             - 0.015 * float(np.dot(acceleration, acceleration))
             - 0.05 * smoothness
             - 6.0 * limit_penalty
-            + 0.40 * float(np.exp(-35.0 * error))
         )
 
         self.prev_acceleration = acceleration.copy()
@@ -289,7 +360,15 @@ class IsaacFrankaTrackingEnv(gym.Env):
             "time": self.t,
             "ee_pos": ee_after,
             "target_pos": next_target_pos,
+            "reward_target_pos": reward_target_pos,
+            "reward_target_vel": reward_target_vel,
+            "closest_target_pos": closest_target_pos,
             "error": error,
+            "timed_error": float(np.linalg.norm(next_target_pos - ee_after)),
+            "trajectory_error": trajectory_error,
+            "velocity_toward_path": velocity_toward_path,
+            "velocity_along_trajectory": velocity_along_trajectory,
+            "ee_velocity": ee_velocity,
             "smoothness": smoothness,
             "jerk_norm": jerk_norm,
             "base_velocity": base_velocity,

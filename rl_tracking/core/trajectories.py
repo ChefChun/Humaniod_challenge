@@ -37,6 +37,17 @@ def target_at(t: float, cfg: TrajectoryConfig) -> tuple[np.ndarray, np.ndarray, 
                 1.1 * radius * omega * np.cos(2.0 * phase),
             ]
         )
+    elif cfg.kind == "vertical8":
+        # Larger vertical figure-eight in the same x-fixed y-z plane. With the default
+        # center, y spans about 0.35-0.59 m and z spans about 0.27-0.45 m.
+        pos = center + np.array([0.0, 1.5 * radius * np.sin(phase), 1.1 * radius * np.sin(2.0 * phase)])
+        vel = np.array(
+            [
+                0.0,
+                1.5 * radius * omega * np.cos(phase),
+                2.2 * radius * omega * np.cos(2.0 * phase),
+            ]
+        )
     else:
         raise ValueError(f"Unknown trajectory kind: {cfg.kind}")
 
@@ -48,3 +59,30 @@ def target_at(t: float, cfg: TrajectoryConfig) -> tuple[np.ndarray, np.ndarray, 
             vel = vel.copy()
 
     return pos, vel, phase
+
+
+def closest_target_on_trajectory(
+    position: np.ndarray,
+    cfg: TrajectoryConfig,
+    samples: int = 180,
+) -> tuple[np.ndarray, np.ndarray, float, float]:
+    """Return the sampled trajectory point closest to a Cartesian position."""
+    position = np.asarray(position, dtype=float)
+    best_pos: np.ndarray | None = None
+    best_vel: np.ndarray | None = None
+    best_phase = 0.0
+    best_distance = float("inf")
+
+    for idx in range(samples):
+        t = cfg.period * idx / samples
+        pos, vel, phase = target_at(t, cfg)
+        distance = float(np.linalg.norm(pos - position))
+        if distance < best_distance:
+            best_pos = pos
+            best_vel = vel
+            best_phase = phase
+            best_distance = distance
+
+    assert best_pos is not None
+    assert best_vel is not None
+    return best_pos, best_vel, best_phase, best_distance

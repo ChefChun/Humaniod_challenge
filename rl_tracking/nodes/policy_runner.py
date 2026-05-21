@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--controller-topic", default="/isaac_joint_commands")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
     parser.add_argument("--dt", type=float, default=0.08)
-    parser.add_argument("--trajectory", choices=["circle", "figure8"])
+    parser.add_argument("--trajectory", choices=["circle", "figure8", "vertical8"])
     parser.add_argument("--max-joint-speed", type=float)
     parser.add_argument("--max-joint-accel", type=float)
     parser.add_argument("--max-joint-jerk", type=float)

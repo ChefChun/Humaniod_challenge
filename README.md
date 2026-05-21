@@ -3,7 +3,7 @@
 This folder contains a focused SAC baseline for training a Franka arm in Isaac Sim:
 
 - Franka 7-DoF arm driven through Isaac ROS2 topics
-- Time-varying Cartesian targets: circle or figure-eight
+- Time-varying Cartesian targets: circle, figure-eight, or larger vertical figure-eight
 - Reinforcement learning core: custom PyTorch SAC
 - Smooth control: residual joint-acceleration policy on top of damped velocity IK
 - Uncertainty: observation and action noise
@@ -32,6 +32,14 @@ Launch Isaac Sim first, confirm the topics exist with `ros2 topic list`, then ru
 
 ```bash
 python -m rl_tracking.training.torch_isaac --total-timesteps 200000
+```
+
+To train on the larger vertical figure-eight:
+
+```bash
+python -m rl_tracking.training.torch_isaac \
+  --trajectory vertical8 \
+  --total-timesteps 200000
 ```
 
 The implementation is organized by responsibility:
@@ -105,6 +113,12 @@ Publish the configured target path and the moving target point as ROS2 visualiza
 
 ```bash
 python -m rl_tracking.nodes.trajectory_visualizer --trajectory figure8 --frame-id world
+```
+
+For the larger vertical figure-eight:
+
+```bash
+python -m rl_tracking.nodes.trajectory_visualizer --trajectory vertical8 --frame-id world
 ```
 
 The marker topic is:

@@ -12,7 +12,7 @@ from ..core.trajectories import TrajectoryConfig, target_at
 # converts those joints to the green end-effector marker.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Publish the configured target trajectory as ROS2 visualization markers.")
-    parser.add_argument("--trajectory", choices=["circle", "figure8"], default="figure8")
+    parser.add_argument("--trajectory", choices=["circle", "figure8", "vertical8"], default="figure8")
     parser.add_argument("--frame-id", default="world")
     parser.add_argument("--topic", default="/rl_tracking/trajectory_markers")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")

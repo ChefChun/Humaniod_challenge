@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-dir", default="runs/torch_isaac")
     parser.add_argument("--save-freq", type=int, default=10_000)
     parser.add_argument("--log-freq", type=int, default=100)
-    parser.add_argument("--trajectory", choices=["circle", "figure8"], default="figure8")
+    parser.add_argument("--trajectory", choices=["circle", "figure8", "vertical8"], default="figure8")
     parser.add_argument("--controller-topic", default="/isaac_joint_commands")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
     parser.add_argument("--dt", type=float, default=0.08)
@@ -30,6 +30,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-joint-accel", type=float, default=2.5)
     parser.add_argument("--max-joint-jerk", type=float, default=18.0)
     parser.add_argument("--residual-scale", type=float, default=0.35)
+    parser.add_argument("--curriculum-switch-min-episodes", type=int, default=5)
+    parser.add_argument("--curriculum-switch-window", type=int, default=5)
+    parser.add_argument("--curriculum-switch-trajectory-error", type=float, default=0.045)
+    parser.add_argument("--trajectory-projection-samples", type=int, default=180)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--buffer-size", type=int, default=300_000)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -74,6 +78,7 @@ def main() -> None:
         max_joint_speed=args.max_joint_speed,
         max_joint_accel=args.max_joint_accel,
         max_joint_jerk=args.max_joint_jerk,
+        trajectory_projection_samples=args.trajectory_projection_samples,
         controller_topic=args.controller_topic,
         joint_states_topic=args.joint_states_topic,
         settle_timeout=args.settle_timeout,
@@ -121,6 +126,9 @@ def main() -> None:
                 "episode_length",
                 "reward",
                 "tracking_error",
+                "timed_error",
+                "trajectory_error",
+                "velocity_toward_path",
                 "smoothness",
                 "jerk_norm",
                 "command_velocity_norm",
@@ -144,8 +152,16 @@ def main() -> None:
                 f"max_accel={env_config.max_joint_accel} "
                 f"max_jerk={env_config.max_joint_jerk}"
             )
+            print(
+                "reward curriculum: trajectory-path reward first, timed target reward after "
+                f"{args.curriculum_switch_window} recent episode(s) average trajectory error "
+                f"< {args.curriculum_switch_trajectory_error}"
+            )
 
             last_losses: dict[str, float] = {}
+            reward_mode = "trajectory"
+            recent_episode_trajectory_errors: list[float] = []
+            episode_trajectory_error_sum = 0.0
             for step in range(1, args.total_timesteps + 1):
                 if step < args.learning_starts:
                     action = env.action_space.sample()
@@ -159,6 +175,7 @@ def main() -> None:
                 obs = next_obs
                 episode_return += reward
                 episode_length += 1
+                episode_trajectory_error_sum += float(info.get("trajectory_error", 0.0))
 
                 if step >= args.update_after and replay.size >= args.batch_size and step % args.update_every == 0:
                     for _ in range(args.updates_per_step):
@@ -166,6 +183,9 @@ def main() -> None:
 
                 if writer is not None:
                     writer.add_scalar("tracking/error_m", info.get("error", 0.0), step)
+                    writer.add_scalar("tracking/timed_error_m", info.get("timed_error", 0.0), step)
+                    writer.add_scalar("tracking/trajectory_error_m", info.get("trajectory_error", 0.0), step)
+                    writer.add_scalar("tracking/velocity_toward_path", info.get("velocity_toward_path", 0.0), step)
                     writer.add_scalar("tracking/smoothness", info.get("smoothness", 0.0), step)
                     writer.add_scalar("tracking/jerk_norm", info.get("jerk_norm", 0.0), step)
                     # Control norms reveal saturation even when reward still appears to improve.
@@ -191,6 +211,9 @@ def main() -> None:
                         "episode_length": episode_length,
                         "reward": reward,
                         "tracking_error": info.get("error", 0.0),
+                        "timed_error": info.get("timed_error", 0.0),
+                        "trajectory_error": info.get("trajectory_error", 0.0),
+                        "velocity_toward_path": info.get("velocity_toward_path", 0.0),
                         "smoothness": info.get("smoothness", 0.0),
                         "jerk_norm": info.get("jerk_norm", 0.0),
                         "command_velocity_norm": float(np.linalg.norm(info.get("command_velocity", np.zeros(7)))),
@@ -218,10 +241,29 @@ def main() -> None:
                     if writer is not None:
                         writer.add_scalar("episode/return", episode_return, episode_idx)
                         writer.add_scalar("episode/length", episode_length, episode_idx)
+                    if episode_length > 0:
+                        mean_trajectory_error = episode_trajectory_error_sum / episode_length
+                        recent_episode_trajectory_errors.append(mean_trajectory_error)
+                        recent_episode_trajectory_errors = recent_episode_trajectory_errors[-args.curriculum_switch_window :]
+                        can_switch = (
+                            reward_mode == "trajectory"
+                            and episode_idx + 1 >= args.curriculum_switch_min_episodes
+                            and len(recent_episode_trajectory_errors) == args.curriculum_switch_window
+                            and float(np.mean(recent_episode_trajectory_errors)) < args.curriculum_switch_trajectory_error
+                        )
+                        if can_switch:
+                            reward_mode = "timed"
+                            env.set_reward_mode("timed")
+                            print(
+                                "Curriculum switched to timed target reward "
+                                f"after episode {episode_idx}; mean trajectory error "
+                                f"{float(np.mean(recent_episode_trajectory_errors)):.4f}"
+                            )
                     episode_idx += 1
                     obs, _ = env.reset(seed=args.seed + episode_idx)
                     episode_return = 0.0
                     episode_length = 0
+                    episode_trajectory_error_sum = 0.0
 
         agent.save(
             str(save_dir / "final_model.pt"),
