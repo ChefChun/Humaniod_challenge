@@ -99,6 +99,22 @@ After training:
 python -m rl_tracking.nodes.policy_runner --model runs/torch_isaac/final_model.pt
 ```
 
+## Visualize The Target Trajectory
+
+Publish the configured target path and the moving target point as ROS2 visualization markers:
+
+```bash
+python -m rl_tracking.nodes.trajectory_visualizer --trajectory figure8 --frame-id world
+```
+
+The marker topic is:
+
+```text
+/rl_tracking/trajectory_markers
+```
+
+RViz can display this directly with a `MarkerArray` display. To show it inside the Isaac Sim viewport, your Isaac scene needs a ROS2 marker subscriber or equivalent script that converts these markers into visible USD/debug-draw geometry.
+
 ## Challenge Note
 
 See [NOTES.md](NOTES.md) for the short design note covering state, action, reward, trajectory representation, uncertainty, and evaluation metrics.

@@ -7,6 +7,12 @@ from torch import nn
 from torch.nn import functional as F
 
 
+# SAC data flow:
+# ReplayBuffer stores transitions from the environment:
+#     observation -> action -> reward -> next_observation -> done
+# Actor proposes the next action. Critics estimate how good an observation/action pair is.
+# During update(), critics learn from Bellman targets, the actor learns to choose high-Q actions,
+# and alpha adjusts how exploratory the policy should remain.
 LOG_STD_MIN = -5.0
 LOG_STD_MAX = 2.0
 
@@ -24,6 +30,7 @@ class ReplayBuffer:
         self.size = 0
 
     def add(self, obs, action, reward, next_obs, done) -> None:
+        # Ring-buffer storage keeps memory bounded during long Isaac runs.
         self.obs[self.index] = obs
         self.actions[self.index] = action
         self.rewards[self.index] = reward
@@ -46,6 +53,8 @@ class ReplayBuffer:
 class TrackingEncoder(nn.Module):
     def __init__(self, features_dim: int = 128):
         super().__init__()
+        # The 35D observation is split by meaning so the network can process robot state,
+        # target-tracking state, and previous control history before fusing them.
         self.robot_encoder = nn.Sequential(
             nn.Linear(14, 64),
             nn.LayerNorm(64),
@@ -73,8 +82,11 @@ class TrackingEncoder(nn.Module):
         )
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        # obs[:, 0:14]  = normalized joint positions and joint velocities.
         robot_features = self.robot_encoder(obs[:, 0:14])
+        # obs[:, 14:28] = EE/target position, target velocity, target error, phase.
         tracking_features = self.tracking_encoder(obs[:, 14:28])
+        # obs[:, 28:35] = previous joint acceleration, used to learn smoother commands.
         command_features = self.command_encoder(obs[:, 28:35])
         return self.fusion(torch.cat([robot_features, tracking_features, command_features], dim=-1))
 
@@ -95,6 +107,7 @@ class Actor(nn.Module):
         self.log_std = nn.Linear(hidden_dim, action_dim)
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # The actor outputs a Gaussian policy; tanh later bounds actions to [-1, 1].
         x = self.head(self.encoder(obs))
         mean = self.mean(x)
         log_std = torch.clamp(self.log_std(x), LOG_STD_MIN, LOG_STD_MAX)
@@ -104,9 +117,11 @@ class Actor(nn.Module):
         mean, log_std = self(obs)
         std = log_std.exp()
         normal = torch.distributions.Normal(mean, std)
+        # Reparameterized sample lets the actor receive gradients through stochastic actions.
         raw_action = normal.rsample()
         action = torch.tanh(raw_action)
         log_prob = normal.log_prob(raw_action)
+        # Tanh squashing changes the action density; this correction keeps SAC entropy valid.
         log_prob -= torch.log(1.0 - action.pow(2) + 1e-6)
         return action, log_prob.sum(dim=-1, keepdim=True)
 
@@ -133,6 +148,7 @@ class Critic(nn.Module):
         )
 
     def forward(self, obs: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        # Q(obs, action) estimates expected future reward if this action is taken now.
         return self.q(torch.cat([self.encoder(obs), action], dim=-1))
 
 
@@ -166,6 +182,7 @@ class TorchSACAgent:
         self.critic1_optimizer = torch.optim.Adam(self.critic1.parameters(), lr=config.critic_lr)
         self.critic2_optimizer = torch.optim.Adam(self.critic2.parameters(), lr=config.critic_lr)
 
+        # Default SAC target entropy is one nat of entropy per action dimension.
         target_entropy = config.target_entropy
         if target_entropy is None:
             target_entropy = -float(config.action_dim)
@@ -188,6 +205,7 @@ class TorchSACAgent:
         dones = batch["dones"]
 
         with torch.no_grad():
+            # Bellman target uses target critics and the entropy bonus from SAC.
             next_actions, next_log_probs = self.actor.sample(next_obs)
             target_q1 = self.target_critic1(next_obs, next_actions)
             target_q2 = self.target_critic2(next_obs, next_actions)
@@ -196,6 +214,7 @@ class TorchSACAgent:
 
         q1 = self.critic1(obs, actions)
         q2 = self.critic2(obs, actions)
+        # Critics are trained to match the bootstrapped target return for stored actions.
         critic1_loss = F.mse_loss(q1, backup)
         critic2_loss = F.mse_loss(q2, backup)
 
@@ -208,6 +227,7 @@ class TorchSACAgent:
         self.critic2_optimizer.step()
 
         new_actions, log_probs = self.actor.sample(obs)
+        # Actor maximizes predicted Q while preserving enough entropy for exploration.
         q_new = torch.min(self.critic1(obs, new_actions), self.critic2(obs, new_actions))
         actor_loss = (self.alpha.detach() * log_probs - q_new).mean()
 
@@ -215,11 +235,13 @@ class TorchSACAgent:
         actor_loss.backward()
         self.actor_optimizer.step()
 
+        # Alpha is learned automatically: higher alpha encourages exploration, lower alpha exploits.
         alpha_loss = -(self.log_alpha * (log_probs + self.target_entropy).detach()).mean()
         self.alpha_optimizer.zero_grad(set_to_none=True)
         alpha_loss.backward()
         self.alpha_optimizer.step()
 
+        # Target critics move slowly to stabilize bootstrapped Q-learning targets.
         self._soft_update(self.critic1, self.target_critic1)
         self._soft_update(self.critic2, self.target_critic2)
 

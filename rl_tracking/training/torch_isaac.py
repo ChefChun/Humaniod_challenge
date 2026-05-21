@@ -168,6 +168,7 @@ def main() -> None:
                     writer.add_scalar("tracking/error_m", info.get("error", 0.0), step)
                     writer.add_scalar("tracking/smoothness", info.get("smoothness", 0.0), step)
                     writer.add_scalar("tracking/jerk_norm", info.get("jerk_norm", 0.0), step)
+                    # Control norms reveal saturation even when reward still appears to improve.
                     writer.add_scalar(
                         "control/command_velocity_norm",
                         float(np.linalg.norm(info.get("command_velocity", np.zeros(7)))),

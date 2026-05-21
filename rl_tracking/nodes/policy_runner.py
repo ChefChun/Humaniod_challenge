@@ -12,6 +12,10 @@ from ..core.trajectories import TrajectoryConfig, target_at
 from ..envs.isaac import make_observation
 
 
+# Runtime data flow after training:
+# Isaac publishes joint states -> this node builds the same observation used during training ->
+# the saved SAC actor predicts residual acceleration -> control.py integrates it into desired
+# joint position/velocity -> this node publishes JointState commands back to Isaac.
 def load_env_config(path: Path | None, model_path: Path) -> dict:
     if path is None:
         for candidate in [
@@ -44,9 +48,11 @@ def parse_args() -> argparse.Namespace:
 class TorchPolicyAdapter:
     def __init__(self, path: Path):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # The checkpoint contains the trained actor, critics, entropy temperature, and config.
         self.agent = TorchSACAgent.load(str(path), self.device)
 
     def predict(self, obs: np.ndarray) -> np.ndarray:
+        # Deployment uses deterministic actions so the robot repeats the learned behavior.
         return self.agent.act(obs, deterministic=True)
 
 
@@ -80,6 +86,7 @@ def main() -> None:
             self.start_time = self.get_clock().now()
 
         def on_joint_state(self, msg: JointState) -> None:
+            # Every incoming Isaac joint-state message triggers one policy inference and command.
             positions = dict(zip(msg.name, msg.position))
             velocities = dict(zip(msg.name, msg.velocity)) if msg.velocity else {}
             if not all(name in positions for name in PANDA_JOINT_NAMES):
@@ -88,6 +95,7 @@ def main() -> None:
             self.q = np.array([positions[name] for name in PANDA_JOINT_NAMES], dtype=float)
             self.qd = np.array([velocities.get(name, 0.0) for name in PANDA_JOINT_NAMES], dtype=float)
             if not self.initialized:
+                # Start integration from measured velocity to avoid a command discontinuity on first state.
                 self.command_velocity = np.clip(self.qd, -max_joint_speed, max_joint_speed)
                 self.initialized = True
             self.publish_command()
@@ -97,6 +105,7 @@ def main() -> None:
             elapsed = (self.get_clock().now() - self.start_time).nanoseconds * 1e-9
             target_pos, target_vel, phase = target_at(elapsed, TrajectoryConfig(kind=trajectory_kind))
             ee_pos = forward_kinematics(self.q)
+            # Reuse the exact observation builder from training so the policy sees familiar inputs.
             obs = make_observation(
                 self.q,
                 self.qd,
@@ -108,6 +117,7 @@ def main() -> None:
                 prev_action_scale=max_joint_accel,
             ).astype(np.float32)
             residual = policy.predict(obs)
+            # Deployment mirrors IsaacFrankaTrackingEnv.step: residual action means acceleration.
             base_velocity = damped_velocity_ik(
                 self.q,
                 target_pos - ee_pos,
@@ -135,6 +145,7 @@ def main() -> None:
             self.command_velocity = command_velocity
             self.prev_acceleration = acceleration
 
+            # ROS2 message boundary: Isaac receives these arrays by joint name.
             msg = JointState()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.name = PANDA_JOINT_NAMES

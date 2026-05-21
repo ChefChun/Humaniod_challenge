@@ -18,6 +18,13 @@ from ..core.kinematics import (
 from ..core.trajectories import TrajectoryConfig, target_at
 
 
+# Training-time data flow:
+# 1. Isaac Sim publishes /isaac_joint_states as sensor_msgs/JointState.
+# 2. _joint_state_cb stores those joint positions/velocities in self.q and self.qd.
+# 3. make_observation packs robot state, target state, tracking error, and previous acceleration.
+# 4. SAC reads that observation and outputs a normalized 7D action.
+# 5. step() treats that action as joint acceleration residuals, integrates to velocity/position,
+#    then publishes /isaac_joint_commands back to Isaac Sim.
 def make_observation(
     q: np.ndarray,
     qd: np.ndarray,
@@ -32,6 +39,9 @@ def make_observation(
 ) -> np.ndarray:
     q_center = 0.5 * (PANDA_Q_MAX + PANDA_Q_MIN)
     q_halfspan = 0.5 * (PANDA_Q_MAX - PANDA_Q_MIN)
+    # Keep this ordering aligned with TrackingEncoder in algorithms/sac.py:
+    # [normalized joints, joint velocities, EE position, target position,
+    #  target velocity, target error, trajectory phase, previous acceleration].
     obs = np.concatenate(
         [
             (q - q_center) / q_halfspan,
@@ -92,6 +102,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
         from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
         from sensor_msgs.msg import JointState
 
+        # This node is the bridge between Gym/SAC Python code and Isaac's ROS2 topics.
         self._rclpy = rclpy
         self._JointState = JointState
         self._node = rclpy.create_node(f"isaac_franka_tracking_env_{id(self)}")
@@ -123,6 +134,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self._wait_for_joint_state()
 
     def _joint_state_cb(self, msg) -> None:
+        # ROS2 JointState arrays are name-indexed; rebuild q/qd in the fixed Panda joint order.
         positions = dict(zip(msg.name, msg.position))
         velocities = dict(zip(msg.name, msg.velocity)) if msg.velocity else {}
         if not all(name in positions for name in PANDA_JOINT_NAMES):
@@ -153,6 +165,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
 
     def _publish_position_command(self, q_desired: np.ndarray, qd_desired: np.ndarray | None = None) -> None:
         if self._node is not None:
+            # Isaac consumes desired joint position and optional velocity on the command topic.
             command = self._JointState()
             command.header.stamp = self._node.get_clock().now().to_msg()
             command.name = PANDA_JOINT_NAMES
@@ -217,6 +230,8 @@ class IsaacFrankaTrackingEnv(gym.Env):
         target_pos, target_vel, _ = self._target()
         ee_pos = self._ee_position()
         error_vec = target_pos - ee_pos
+        # Kinematics converts current joints to an EE position; IK asks "what joint velocity
+        # would reduce the Cartesian target error?" SAC then learns acceleration residuals on top.
         base_velocity = damped_velocity_ik(
             self.q,
             error_vec,
@@ -231,6 +246,8 @@ class IsaacFrankaTrackingEnv(gym.Env):
             self.config.max_joint_accel,
             self.config.residual_scale,
         )
+        # The command sent to Isaac is still JointState(position, velocity); acceleration is
+        # an internal control signal integrated over dt to get those publishable quantities.
         desired_q, command_velocity, acceleration, acceleration_delta = integrate_joint_acceleration(
             self.q,
             self.command_velocity,
@@ -255,6 +272,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
         jerk_norm = smoothness / self.config.dt
         limit_penalty = joint_limit_cost(self.q)
 
+        # Reward trades Cartesian tracking against high speed, high acceleration, jerk, and joint-limit pressure.
         reward = (
             -8.0 * error
             - 0.01 * float(np.dot(command_velocity, command_velocity))
