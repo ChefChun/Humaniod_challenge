@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from ..algorithms.sac import TorchSACAgent
+from ..core.control import acceleration_residual_command, integrate_joint_acceleration
 from ..core.kinematics import PANDA_JOINT_NAMES, damped_velocity_ik, forward_kinematics
 from ..core.trajectories import TrajectoryConfig, target_at
 from ..envs.isaac import make_observation
@@ -33,6 +34,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
     parser.add_argument("--dt", type=float, default=0.08)
     parser.add_argument("--trajectory", choices=["circle", "figure8"])
+    parser.add_argument("--max-joint-speed", type=float)
+    parser.add_argument("--max-joint-accel", type=float)
+    parser.add_argument("--max-joint-jerk", type=float)
+    parser.add_argument("--residual-scale", type=float)
     return parser.parse_args()
 
 
@@ -57,6 +62,10 @@ def main() -> None:
     policy = TorchPolicyAdapter(args.model)
     env_config = load_env_config(args.config, args.model)
     trajectory_kind = args.trajectory or env_config.get("trajectory", "figure8")
+    max_joint_speed = args.max_joint_speed if args.max_joint_speed is not None else float(env_config.get("max_joint_speed", 0.8))
+    max_joint_accel = args.max_joint_accel if args.max_joint_accel is not None else float(env_config.get("max_joint_accel", 2.5))
+    max_joint_jerk = args.max_joint_jerk if args.max_joint_jerk is not None else float(env_config.get("max_joint_jerk", 18.0))
+    residual_scale = args.residual_scale if args.residual_scale is not None else float(env_config.get("residual_scale", 0.35))
 
     class TrackerNode(Node):
         def __init__(self) -> None:
@@ -65,7 +74,9 @@ def main() -> None:
             self.subscription = self.create_subscription(JointState, args.joint_states_topic, self.on_joint_state, 10)
             self.q: np.ndarray | None = None
             self.qd = np.zeros(7)
-            self.prev_command = np.zeros(7)
+            self.command_velocity = np.zeros(7)
+            self.prev_acceleration = np.zeros(7)
+            self.initialized = False
             self.start_time = self.get_clock().now()
 
         def on_joint_state(self, msg: JointState) -> None:
@@ -76,6 +87,9 @@ def main() -> None:
 
             self.q = np.array([positions[name] for name in PANDA_JOINT_NAMES], dtype=float)
             self.qd = np.array([velocities.get(name, 0.0) for name in PANDA_JOINT_NAMES], dtype=float)
+            if not self.initialized:
+                self.command_velocity = np.clip(self.qd, -max_joint_speed, max_joint_speed)
+                self.initialized = True
             self.publish_command()
 
         def publish_command(self) -> None:
@@ -86,23 +100,46 @@ def main() -> None:
             obs = make_observation(
                 self.q,
                 self.qd,
-                self.prev_command,
+                self.prev_acceleration,
                 ee_pos,
                 target_pos,
                 target_vel,
                 phase,
+                prev_action_scale=max_joint_accel,
             ).astype(np.float32)
             residual = policy.predict(obs)
-            base = damped_velocity_ik(self.q, target_pos - ee_pos, target_vel)
-            command = np.clip(base + 0.35 * residual, -0.8, 0.8)
-            desired_q = self.q + args.dt * command
-            self.prev_command = command
+            base_velocity = damped_velocity_ik(
+                self.q,
+                target_pos - ee_pos,
+                target_vel,
+                max_joint_speed=max_joint_speed,
+            )
+            desired_acceleration, _, _ = acceleration_residual_command(
+                base_velocity,
+                self.command_velocity,
+                residual,
+                args.dt,
+                max_joint_accel,
+                residual_scale,
+            )
+            desired_q, command_velocity, acceleration, _ = integrate_joint_acceleration(
+                self.q,
+                self.command_velocity,
+                self.prev_acceleration,
+                desired_acceleration,
+                args.dt,
+                max_joint_speed,
+                max_joint_accel,
+                max_joint_jerk,
+            )
+            self.command_velocity = command_velocity
+            self.prev_acceleration = acceleration
 
             msg = JointState()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.name = PANDA_JOINT_NAMES
             msg.position = desired_q.tolist()
-            msg.velocity = command.tolist()
+            msg.velocity = command_velocity.tolist()
             self.publisher.publish(msg)
 
     rclpy.init()

@@ -27,6 +27,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--obs-noise", type=float, default=0.001)
     parser.add_argument("--action-noise", type=float, default=0.01)
     parser.add_argument("--max-joint-speed", type=float, default=0.8)
+    parser.add_argument("--max-joint-accel", type=float, default=2.5)
+    parser.add_argument("--max-joint-jerk", type=float, default=18.0)
     parser.add_argument("--residual-scale", type=float, default=0.35)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--buffer-size", type=int, default=300_000)
@@ -70,6 +72,8 @@ def main() -> None:
         action_noise=args.action_noise,
         residual_scale=args.residual_scale,
         max_joint_speed=args.max_joint_speed,
+        max_joint_accel=args.max_joint_accel,
+        max_joint_jerk=args.max_joint_jerk,
         controller_topic=args.controller_topic,
         joint_states_topic=args.joint_states_topic,
         settle_timeout=args.settle_timeout,
@@ -118,6 +122,9 @@ def main() -> None:
                 "reward",
                 "tracking_error",
                 "smoothness",
+                "jerk_norm",
+                "command_velocity_norm",
+                "acceleration_norm",
                 "actor_loss",
                 "critic1_loss",
                 "critic2_loss",
@@ -131,6 +138,12 @@ def main() -> None:
             print(f"device: {device}")
             print(f"controller_topic: {env_config.controller_topic}")
             print(f"joint_states_topic: {env_config.joint_states_topic}")
+            print(
+                "control: acceleration residuals "
+                f"max_speed={env_config.max_joint_speed} "
+                f"max_accel={env_config.max_joint_accel} "
+                f"max_jerk={env_config.max_joint_jerk}"
+            )
 
             last_losses: dict[str, float] = {}
             for step in range(1, args.total_timesteps + 1):
@@ -154,6 +167,17 @@ def main() -> None:
                 if writer is not None:
                     writer.add_scalar("tracking/error_m", info.get("error", 0.0), step)
                     writer.add_scalar("tracking/smoothness", info.get("smoothness", 0.0), step)
+                    writer.add_scalar("tracking/jerk_norm", info.get("jerk_norm", 0.0), step)
+                    writer.add_scalar(
+                        "control/command_velocity_norm",
+                        float(np.linalg.norm(info.get("command_velocity", np.zeros(7)))),
+                        step,
+                    )
+                    writer.add_scalar(
+                        "control/acceleration_norm",
+                        float(np.linalg.norm(info.get("acceleration", np.zeros(7)))),
+                        step,
+                    )
                     writer.add_scalar("train/reward", reward, step)
                     for key, value in last_losses.items():
                         writer.add_scalar(f"loss/{key}", value, step)
@@ -167,6 +191,9 @@ def main() -> None:
                         "reward": reward,
                         "tracking_error": info.get("error", 0.0),
                         "smoothness": info.get("smoothness", 0.0),
+                        "jerk_norm": info.get("jerk_norm", 0.0),
+                        "command_velocity_norm": float(np.linalg.norm(info.get("command_velocity", np.zeros(7)))),
+                        "acceleration_norm": float(np.linalg.norm(info.get("acceleration", np.zeros(7)))),
                         "actor_loss": last_losses.get("actor_loss", 0.0),
                         "critic1_loss": last_losses.get("critic1_loss", 0.0),
                         "critic2_loss": last_losses.get("critic2_loss", 0.0),

@@ -5,6 +5,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
+from ..core.control import acceleration_residual_command, integrate_joint_acceleration
 from ..core.kinematics import (
     PANDA_JOINT_NAMES,
     PANDA_Q_HOME,
@@ -26,6 +27,7 @@ def make_observation(
     target_vel: np.ndarray,
     phase: float,
     noise_std: float = 0.0,
+    prev_action_scale: float = 1.5,
     rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     q_center = 0.5 * (PANDA_Q_MAX + PANDA_Q_MIN)
@@ -39,7 +41,7 @@ def make_observation(
             target_vel,
             target_pos - ee_pos,
             np.array([np.sin(phase), np.cos(phase)]),
-            prev_action / 1.5,
+            prev_action / prev_action_scale,
         ]
     ).astype(float)
 
@@ -57,6 +59,8 @@ class IsaacEnvConfig:
     action_noise: float = 0.01
     residual_scale: float = 0.35
     max_joint_speed: float = 0.8
+    max_joint_accel: float = 2.5
+    max_joint_jerk: float = 18.0
     controller_topic: str = "/isaac_joint_commands"
     joint_states_topic: str = "/isaac_joint_states"
     reset_duration: float = 2.0
@@ -111,7 +115,8 @@ class IsaacFrankaTrackingEnv(gym.Env):
 
         self.q: np.ndarray | None = None
         self.qd = np.zeros(7, dtype=float)
-        self.prev_command = np.zeros(7, dtype=float)
+        self.command_velocity = np.zeros(7, dtype=float)
+        self.prev_acceleration = np.zeros(7, dtype=float)
         self.step_count = 0
         self.t = 0.0
         self.trajectory_cfg = TrajectoryConfig(kind=config.trajectory)
@@ -169,12 +174,13 @@ class IsaacFrankaTrackingEnv(gym.Env):
         obs = make_observation(
             self.q,
             self.qd,
-            self.prev_command,
+            self.prev_acceleration,
             self._ee_position(),
             target_pos,
             target_vel,
             phase,
             noise_std=self.config.obs_noise,
+            prev_action_scale=self.config.max_joint_accel,
             rng=self.rng,
         )
         return obs.astype(np.float32)
@@ -191,7 +197,8 @@ class IsaacFrankaTrackingEnv(gym.Env):
 
         self.step_count = 0
         self.t = 0.0
-        self.prev_command = np.zeros(7, dtype=float)
+        self.command_velocity = np.zeros(7, dtype=float)
+        self.prev_acceleration = np.zeros(7, dtype=float)
         self.trajectory_cfg = TrajectoryConfig(kind=self.config.trajectory)
 
         random_offset = self.rng.normal(0.0, 0.025, size=7)
@@ -204,42 +211,60 @@ class IsaacFrankaTrackingEnv(gym.Env):
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
         assert self.q is not None
         action = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
+        if self.config.action_noise > 0.0:
+            action = np.clip(action + self.rng.normal(0.0, self.config.action_noise, size=7), -1.0, 1.0)
 
         target_pos, target_vel, _ = self._target()
         ee_pos = self._ee_position()
         error_vec = target_pos - ee_pos
-        base_command = damped_velocity_ik(
+        base_velocity = damped_velocity_ik(
             self.q,
             error_vec,
             target_vel,
             max_joint_speed=self.config.max_joint_speed,
         )
-        command = base_command + self.config.residual_scale * action
-        command += self.rng.normal(0.0, self.config.action_noise, size=7)
-        command = np.clip(command, -self.config.max_joint_speed, self.config.max_joint_speed)
-
-        desired_q = np.clip(self.q + self.config.dt * command, PANDA_Q_MIN, PANDA_Q_MAX)
-        self._publish_position_command(desired_q, command)
+        desired_acceleration, base_acceleration, residual_acceleration = acceleration_residual_command(
+            base_velocity,
+            self.command_velocity,
+            action,
+            self.config.dt,
+            self.config.max_joint_accel,
+            self.config.residual_scale,
+        )
+        desired_q, command_velocity, acceleration, acceleration_delta = integrate_joint_acceleration(
+            self.q,
+            self.command_velocity,
+            self.prev_acceleration,
+            desired_acceleration,
+            self.config.dt,
+            self.config.max_joint_speed,
+            self.config.max_joint_accel,
+            self.config.max_joint_jerk,
+        )
+        self._publish_position_command(desired_q, command_velocity)
         self._spin_for(self.config.dt)
 
+        self.command_velocity = command_velocity
         self.t += self.config.dt
         self.step_count += 1
 
         next_target_pos, _, _ = self._target()
         ee_after = self._ee_position()
         error = float(np.linalg.norm(next_target_pos - ee_after))
-        command_delta = float(np.linalg.norm(command - self.prev_command))
+        smoothness = float(np.linalg.norm(acceleration_delta))
+        jerk_norm = smoothness / self.config.dt
         limit_penalty = joint_limit_cost(self.q)
 
         reward = (
             -8.0 * error
-            - 0.02 * float(np.dot(command, command))
-            - 0.10 * command_delta
+            - 0.01 * float(np.dot(command_velocity, command_velocity))
+            - 0.015 * float(np.dot(acceleration, acceleration))
+            - 0.05 * smoothness
             - 6.0 * limit_penalty
             + 0.40 * float(np.exp(-35.0 * error))
         )
 
-        self.prev_command = command.copy()
+        self.prev_acceleration = acceleration.copy()
         terminated = False
         truncated = self.step_count >= self.config.horizon
         info = {
@@ -247,9 +272,14 @@ class IsaacFrankaTrackingEnv(gym.Env):
             "ee_pos": ee_after,
             "target_pos": next_target_pos,
             "error": error,
-            "smoothness": command_delta,
-            "base_command": base_command,
-            "command": command,
+            "smoothness": smoothness,
+            "jerk_norm": jerk_norm,
+            "base_velocity": base_velocity,
+            "base_acceleration": base_acceleration,
+            "residual_acceleration": residual_acceleration,
+            "acceleration": acceleration,
+            "command_velocity": command_velocity,
+            "command": command_velocity,
             "is_success": error < 0.035,
         }
         return self._observe(), float(reward), terminated, truncated, info

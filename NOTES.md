@@ -71,11 +71,14 @@ Supported uncertainty sources:
 
 These are CLI flags in `rl_tracking.training.torch_isaac`.
 
+On the `acc` branch, the policy output is interpreted as a normalized joint acceleration residual. The controller adds it to the acceleration needed to track the damped-IK velocity target, clips acceleration, applies a jerk limit, then integrates to commanded joint velocity and joint position. This keeps the learned policy responsive while reducing abrupt command changes before they reach the robot.
+
 ## Evaluation
 
 Training logs:
 
 - mean / max Cartesian tracking error
 - RMS command delta as a smoothness metric
+- acceleration and jerk metrics
 - success flag for low tracking error
 - TensorBoard logs and periodic SAC checkpoints
