@@ -157,6 +157,12 @@ class IsaacFrankaTrackingEnv(gym.Env):
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
         )
+        collision_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
         self._command_pub = self._node.create_publisher(
             JointState,
             config.controller_topic,
@@ -168,27 +174,20 @@ class IsaacFrankaTrackingEnv(gym.Env):
             self._joint_state_cb,
             qos,
         )
-        collision_topics = self._resolve_collision_topics(config.collision_topics)
-        self.collision_topics = collision_topics
-        self.collision_components = tuple(_collision_component_name(topic) for topic in collision_topics)
-        self.collision_states = {component: False for component in self.collision_components}
-        self.collision_magnitudes = {component: 0.0 for component in self.collision_components}
-        self.collision_event_counts = {component: 0 for component in self.collision_components}
+        self._configured_collision_topics = tuple(config.collision_topics)
+        self._collision_root_topic = config.collision_topic.rstrip("/")
+        self._collision_qos = collision_qos
+        self._collision_msg_cls = _load_ros_message_type(config.collision_msg_type)
+        self._collision_subs = {}
+        self.collision_topics: tuple[str, ...] = ()
+        self.collision_components: tuple[str, ...] = ()
+        self.collision_states: dict[str, bool] = {}
+        self.collision_magnitudes: dict[str, float] = {}
+        self.collision_event_counts: dict[str, int] = {}
         self.in_collision = False
         self.collision_magnitude = 0.0
         self.collision_count = 0
-        collision_msg_cls = _load_ros_message_type(config.collision_msg_type)
-        self._collision_subs = []
-        for topic, component in zip(collision_topics, self.collision_components):
-            self._collision_subs.append(
-                self._node.create_subscription(
-                    collision_msg_cls,
-                    topic,
-                    lambda msg, component=component: self._collision_cb(msg, component),
-                    qos,
-                )
-            )
-        self._node.get_logger().info(f"Collision monitor subscribed to: {', '.join(collision_topics)}")
+        self._refresh_collision_subscriptions()
 
         self.q: np.ndarray | None = None
         self.qd = np.zeros(7, dtype=float)
@@ -201,17 +200,48 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.trajectory_cfg = TrajectoryConfig(kind=config.trajectory)
         self._wait_for_joint_state()
 
-    def _resolve_collision_topics(self, configured_topics: tuple[str, ...]) -> tuple[str, ...]:
-        if configured_topics:
-            return tuple(configured_topics)
+    def _refresh_collision_subscriptions(self) -> None:
+        if self._node is None:
+            return
+        if self._configured_collision_topics:
+            topics = self._configured_collision_topics
+        else:
+            topics = sorted(
+                name
+                for name, _ in self._node.get_topic_names_and_types()
+                if name.startswith(f"{self._collision_root_topic}/")
+            )
+            if not topics and not self._collision_subs:
+                topics = (self.config.collision_topic,)
 
-        root_topic = self.config.collision_topic.rstrip("/")
-        visible_component_topics = sorted(
+        for topic in topics:
+            self._subscribe_collision_topic(topic)
+
+    def _subscribe_collision_topic(self, topic: str) -> None:
+        if topic in self._collision_subs:
+            return
+        component = _collision_component_name(topic)
+        self.collision_states.setdefault(component, False)
+        self.collision_magnitudes.setdefault(component, 0.0)
+        self.collision_event_counts.setdefault(component, 0)
+        self._collision_subs[topic] = self._node.create_subscription(
+            self._collision_msg_cls,
+            topic,
+            lambda msg, component=component: self._collision_cb(msg, component),
+            self._collision_qos,
+        )
+        self.collision_topics = tuple(self._collision_subs.keys())
+        self.collision_components = tuple(_collision_component_name(topic) for topic in self.collision_topics)
+        self._node.get_logger().info(f"Collision monitor subscribed to {topic} as component '{component}'")
+
+    def _visible_collision_component_topics(self) -> list[str]:
+        if self._node is None:
+            return []
+        return sorted(
             name
             for name, _ in self._node.get_topic_names_and_types()
-            if name.startswith(f"{root_topic}/")
+            if name.startswith(f"{self._collision_root_topic}/")
         )
-        return tuple(visible_component_topics) if visible_component_topics else (self.config.collision_topic,)
 
     def _joint_state_cb(self, msg) -> None:
         # ROS2 JointState arrays are name-indexed; rebuild q/qd in the fixed Panda joint order.
@@ -276,12 +306,14 @@ class IsaacFrankaTrackingEnv(gym.Env):
         deadline = time.time() + duration
         if self._node is not None:
             while time.time() < deadline:
+                self._refresh_collision_subscriptions()
                 self._rclpy.spin_once(self._node, timeout_sec=0.01)
 
     def _wait_for_joint_state(self) -> None:
         start = time.time()
         if self._node is not None:
             while self.q is None:
+                self._refresh_collision_subscriptions()
                 self._rclpy.spin_once(self._node, timeout_sec=0.1)
                 if time.time() - start > self.config.settle_timeout:
                     topics = self._node.get_topic_names_and_types()

@@ -130,13 +130,13 @@ python -m rl_tracking.nodes.policy_runner --model runs/torch_isaac/final_model.p
 Publish the configured target path and the moving target point as ROS2 visualization markers:
 
 ```bash
-python -m rl_tracking.nodes.trajectory_visualizer --trajectory figure8 --frame-id world
+python -m rl_tracking.nodes.trajectory_visualizer --trajectory figure8 --frame-id panda_link0
 ```
 
 For the larger horizontal figure-eight:
 
 ```bash
-python -m rl_tracking.nodes.trajectory_visualizer --trajectory horizontal8 --frame-id world
+python -m rl_tracking.nodes.trajectory_visualizer --trajectory horizontal8 --frame-id panda_link0
 ```
 
 The marker topic is:

@@ -39,12 +39,16 @@ def target_at(t: float, cfg: TrajectoryConfig) -> tuple[np.ndarray, np.ndarray, 
         )
     elif cfg.kind in {"horizontal8", "vertical8"}:
         # Large horizontal figure-eight above the Franka. With the default center,
-        # x spans about -0.14-0.18 m, y spans about 0.35-0.59 m, and z stays at 0.52 m.
-        pos = center + np.array([2.0 * radius * np.sin(phase), 1.5 * radius * np.sin(2.0 * phase), 0.16])
+        # x spans about -0.18-0.22 m, y spans about 0.30-0.60 m, and z stays at 0.58 m.
+        x_amp = 2.5 * radius
+        y_amp = 1.9 * radius
+        y_offset = -0.02
+        z_lift = 0.22
+        pos = center + np.array([x_amp * np.sin(phase), y_offset + y_amp * np.sin(2.0 * phase), z_lift])
         vel = np.array(
             [
-                2.0 * radius * omega * np.cos(phase),
-                3.0 * radius * omega * np.cos(2.0 * phase),
+                x_amp * omega * np.cos(phase),
+                2.0 * y_amp * omega * np.cos(2.0 * phase),
                 0.0,
             ]
         )

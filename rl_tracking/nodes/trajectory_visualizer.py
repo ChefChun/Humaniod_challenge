@@ -2,18 +2,20 @@ import argparse
 
 import numpy as np
 
-from ..core.kinematics import PANDA_JOINT_NAMES, forward_kinematics
+from ..core.kinematics import PANDA_JOINT_NAMES, hand_position
 from ..core.trajectories import TrajectoryConfig, target_at
 
 
 # Visualization data flow:
 # target_at() produces the desired path and moving target marker.
-# /isaac_joint_states provides the current robot joints, and forward_kinematics()
-# converts those joints to the green end-effector marker.
+# /isaac_joint_states provides the current robot joints, and hand_position()
+# converts those joints to the green hand marker.
+# Both target_at() and hand_position() use the Franka base frame, so the
+# marker frame should be the robot base link unless you explicitly transform data elsewhere.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Publish the configured target trajectory as ROS2 visualization markers.")
     parser.add_argument("--trajectory", choices=["circle", "figure8", "horizontal8"], default="figure8")
-    parser.add_argument("--frame-id", default="world")
+    parser.add_argument("--frame-id", default="panda_link0")
     parser.add_argument("--topic", default="/rl_tracking/trajectory_markers")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
     parser.add_argument("--center", nargs=3, type=float, default=(0.02, 0.47, 0.36), metavar=("X", "Y", "Z"))
@@ -56,7 +58,7 @@ def main() -> None:
                 depth=1,
             )
             self.publisher = self.create_publisher(MarkerArray, args.topic, qos)
-            # Joint states are only needed for the actual end-effector marker.
+            # Joint states are only needed for the actual hand marker.
             self.joint_state_subscription = self.create_subscription(
                 JointState,
                 args.joint_states_topic,
@@ -65,12 +67,19 @@ def main() -> None:
             )
             self.start_time = self.get_clock().now()
             self.path_points = self._sample_path()
-            self.ee_pos: np.ndarray | None = None
+            self.path_bounds = self._path_bounds()
+            self.hand_pos: np.ndarray | None = None
             self.timer = self.create_timer(1.0 / args.rate_hz, self.publish_markers)
             self.status_timer = self.create_timer(2.0, self.log_status)
             self.get_logger().info(
                 f"Publishing {args.trajectory} trajectory markers on {args.topic} "
                 f"in frame '{args.frame_id}' with {len(self.path_points)} path points."
+            )
+            self.get_logger().info(
+                "Trajectory bounds "
+                f"x=[{self.path_bounds[0][0]:.3f}, {self.path_bounds[1][0]:.3f}] "
+                f"y=[{self.path_bounds[0][1]:.3f}, {self.path_bounds[1][1]:.3f}] "
+                f"z=[{self.path_bounds[0][2]:.3f}, {self.path_bounds[1][2]:.3f}]"
             )
             self.get_logger().info(f"Subscribing to Franka joint states on {args.joint_states_topic}.")
             self.get_logger().info("Use RViz MarkerArray display, or an Isaac Sim marker/debug-draw subscriber, to see it.")
@@ -79,9 +88,9 @@ def main() -> None:
             positions = dict(zip(msg.name, msg.position))
             if not all(name in positions for name in PANDA_JOINT_NAMES):
                 return
-            # Use the same FK approximation as training so RViz shows the controller's EE estimate.
+            # Green RViz marker should show the hand link, not the extra tool-tip offset.
             q = np.array([positions[name] for name in PANDA_JOINT_NAMES], dtype=float)
-            self.ee_pos = forward_kinematics(q)
+            self.hand_pos = hand_position(q)
 
         def _sample_path(self) -> list[Point]:
             points = []
@@ -90,6 +99,10 @@ def main() -> None:
                 pos, _, _ = target_at(t, cfg)
                 points.append(Point(x=float(pos[0]), y=float(pos[1]), z=float(pos[2])))
             return points
+
+        def _path_bounds(self) -> tuple[np.ndarray, np.ndarray]:
+            points = np.array([[point.x, point.y, point.z] for point in self.path_points], dtype=float)
+            return points.min(axis=0), points.max(axis=0)
 
         def _base_marker(self, marker_id: int, marker_type: int) -> Marker:
             # RViz/Isaac identify markers by namespace and id; reusing ids updates old markers.
@@ -131,21 +144,21 @@ def main() -> None:
             target.color.a = 0.95
 
             markers = [path, target]
-            if self.ee_pos is not None:
-                # Green: current end-effector estimate from joint states.
-                ee = self._base_marker(2, Marker.SPHERE)
-                ee.pose.position.x = float(self.ee_pos[0])
-                ee.pose.position.y = float(self.ee_pos[1])
-                ee.pose.position.z = float(self.ee_pos[2])
-                ee.scale.x = 0.04
-                ee.scale.y = 0.04
-                ee.scale.z = 0.04
-                ee.color.r = 0.05
-                ee.color.g = 0.9
-                ee.color.b = 0.25
-                ee.color.a = 0.95
+            if self.hand_pos is not None:
+                # Green: current hand-link estimate from joint states.
+                hand = self._base_marker(2, Marker.SPHERE)
+                hand.pose.position.x = float(self.hand_pos[0])
+                hand.pose.position.y = float(self.hand_pos[1])
+                hand.pose.position.z = float(self.hand_pos[2])
+                hand.scale.x = 0.04
+                hand.scale.y = 0.04
+                hand.scale.z = 0.04
+                hand.color.r = 0.05
+                hand.color.g = 0.9
+                hand.color.b = 0.25
+                hand.color.a = 0.95
 
-                # Yellow: instantaneous tracking error between actual EE and target.
+                # Yellow: instantaneous offset between hand marker and target.
                 error = self._base_marker(3, Marker.LINE_STRIP)
                 error.scale.x = 0.006
                 error.color.r = 1.0
@@ -153,10 +166,10 @@ def main() -> None:
                 error.color.b = 0.0
                 error.color.a = 0.85
                 error.points = [
-                    Point(x=float(self.ee_pos[0]), y=float(self.ee_pos[1]), z=float(self.ee_pos[2])),
+                    Point(x=float(self.hand_pos[0]), y=float(self.hand_pos[1]), z=float(self.hand_pos[2])),
                     Point(x=float(target_pos[0]), y=float(target_pos[1]), z=float(target_pos[2])),
                 ]
-                markers.extend([ee, error])
+                markers.extend([hand, error])
 
             self.publisher.publish(MarkerArray(markers=markers))
 
@@ -168,7 +181,7 @@ def main() -> None:
             else:
                 self.get_logger().info(f"{subscribers} subscriber(s) connected on {args.topic}.")
             if joint_publishers == 0:
-                self.get_logger().warn(f"No publishers on {args.joint_states_topic}; actual end-effector marker is unavailable.")
+                self.get_logger().warn(f"No publishers on {args.joint_states_topic}; actual hand marker is unavailable.")
 
     rclpy.init()
     node = TrajectoryVisualizer()

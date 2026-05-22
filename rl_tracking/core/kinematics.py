@@ -4,6 +4,7 @@ import numpy as np
 # This file is the geometry layer. It does not know about ROS2 or RL.
 # It answers questions like:
 # - Given 7 joint angles, where is the end effector?        forward_kinematics()
+# - Given 7 joint angles, where is the hand link?           hand_position()
 # - Given a target Cartesian velocity, how should joints move? damped_velocity_ik()
 PANDA_JOINT_NAMES = [
     "panda_joint1",
@@ -35,8 +36,7 @@ def _dh(a: float, alpha: float, d: float, theta: float) -> np.ndarray:
     )
 
 
-def forward_kinematics(q: np.ndarray) -> np.ndarray:
-    """Approximate Franka Panda end-effector position from 7 joint angles."""
+def _panda_wrist_transform(q: np.ndarray) -> np.ndarray:
     q = np.asarray(q, dtype=float)
     # These DH parameters approximate the Franka arm link geometry.
     a = np.array([0.0, 0.0, 0.0, 0.0825, -0.0825, 0.0, 0.088])
@@ -47,7 +47,17 @@ def forward_kinematics(q: np.ndarray) -> np.ndarray:
     transform = np.eye(4)
     for i in range(7):
         transform = transform @ _dh(a[i], alpha[i], d[i], q[i])
+    return transform
 
+
+def hand_position(q: np.ndarray) -> np.ndarray:
+    """Approximate Franka hand-link position from 7 joint angles."""
+    return _panda_wrist_transform(q)[:3, 3]
+
+
+def forward_kinematics(q: np.ndarray) -> np.ndarray:
+    """Approximate Franka Panda end-effector position from 7 joint angles."""
+    transform = _panda_wrist_transform(q)
     # Add a small tool offset so the reported point is closer to the end-effector tip.
     tool_offset = np.array([0.0, 0.0, 0.103, 1.0])
     return (transform @ tool_offset)[:3]
