@@ -2,25 +2,32 @@ import argparse
 
 import numpy as np
 
-from ..core.kinematics import PANDA_JOINT_NAMES, hand_position
-from ..core.trajectories import TrajectoryConfig, target_at
+from ..core.kinematics import PANDA_BASE_FRAME, PANDA_EE_FRAME, PANDA_JOINT_NAMES, forward_kinematics
+from ..core.trajectories import (
+    DEFAULT_TRAJECTORY_CENTER,
+    DEFAULT_TRAJECTORY_PERIOD,
+    DEFAULT_TRAJECTORY_RADIUS,
+    TRAJECTORY_KINDS,
+    make_trajectory_config,
+    target_at,
+)
 
 
 # Visualization data flow:
 # target_at() produces the desired path and moving target marker.
-# /isaac_joint_states provides the current robot joints, and hand_position()
-# converts those joints to the green hand marker.
-# Both target_at() and hand_position() use the Franka base frame, so the
-# marker frame should be the robot base link unless you explicitly transform data elsewhere.
+# When TF is available, the green marker uses the actual robot end-effector frame.
+# Otherwise it falls back to the same local FK used by training and the kinematic runner.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Publish the configured target trajectory as ROS2 visualization markers.")
-    parser.add_argument("--trajectory", choices=["circle", "figure8", "horizontal8"], default="figure8")
-    parser.add_argument("--frame-id", default="panda_link0")
+    parser.add_argument("--trajectory", choices=TRAJECTORY_KINDS, default="figure8")
+    parser.add_argument("--frame-id", default=PANDA_BASE_FRAME)
+    parser.add_argument("--ee-frame", default=PANDA_EE_FRAME)
+    parser.add_argument("--ee-source", choices=["tf", "fk", "none"], default="tf")
     parser.add_argument("--topic", default="/rl_tracking/trajectory_markers")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
-    parser.add_argument("--center", nargs=3, type=float, default=(0.02, 0.47, 0.36), metavar=("X", "Y", "Z"))
-    parser.add_argument("--radius", type=float, default=0.08)
-    parser.add_argument("--period", type=float, default=6.0)
+    parser.add_argument("--center", nargs=3, type=float, default=DEFAULT_TRAJECTORY_CENTER, metavar=("X", "Y", "Z"))
+    parser.add_argument("--radius", type=float, default=DEFAULT_TRAJECTORY_RADIUS)
+    parser.add_argument("--period", type=float, default=DEFAULT_TRAJECTORY_PERIOD)
     parser.add_argument("--samples", type=int, default=160)
     parser.add_argument("--rate-hz", type=float, default=20.0)
     parser.add_argument("--unreachable", action="store_true")
@@ -35,12 +42,17 @@ def main() -> None:
         from rclpy.duration import Duration
         from rclpy.node import Node
         from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+        from rclpy.time import Time
         from sensor_msgs.msg import JointState
         from visualization_msgs.msg import Marker, MarkerArray
+        if args.ee_source == "tf":
+            from tf2_ros import Buffer, TransformException, TransformListener
+        else:
+            Buffer = TransformException = TransformListener = None
     except ImportError as exc:
         raise SystemExit("ROS2 visualization packages are not available. Source your ROS2 workspace first.") from exc
 
-    cfg = TrajectoryConfig(
+    cfg = make_trajectory_config(
         kind=args.trajectory,
         center=tuple(args.center),
         radius=args.radius,
@@ -58,7 +70,7 @@ def main() -> None:
                 depth=1,
             )
             self.publisher = self.create_publisher(MarkerArray, args.topic, qos)
-            # Joint states are only needed for the actual hand marker.
+            # Joint states are only needed for the actual end-effector marker.
             self.joint_state_subscription = self.create_subscription(
                 JointState,
                 args.joint_states_topic,
@@ -68,7 +80,10 @@ def main() -> None:
             self.start_time = self.get_clock().now()
             self.path_points = self._sample_path()
             self.path_bounds = self._path_bounds()
-            self.hand_pos: np.ndarray | None = None
+            self.fk_ee_pos: np.ndarray | None = None
+            self.last_tf_error: str | None = None
+            self.tf_buffer = Buffer() if args.ee_source == "tf" else None
+            self.tf_listener = TransformListener(self.tf_buffer, self) if self.tf_buffer is not None else None
             self.timer = self.create_timer(1.0 / args.rate_hz, self.publish_markers)
             self.status_timer = self.create_timer(2.0, self.log_status)
             self.get_logger().info(
@@ -82,15 +97,19 @@ def main() -> None:
                 f"z=[{self.path_bounds[0][2]:.3f}, {self.path_bounds[1][2]:.3f}]"
             )
             self.get_logger().info(f"Subscribing to Franka joint states on {args.joint_states_topic}.")
+            if args.ee_source == "tf":
+                self.get_logger().info(f"End-effector marker source: TF {args.frame_id} <- {args.ee_frame}.")
+            else:
+                self.get_logger().info(f"End-effector marker source: {args.ee_source}.")
             self.get_logger().info("Use RViz MarkerArray display, or an Isaac Sim marker/debug-draw subscriber, to see it.")
 
         def on_joint_state(self, msg: JointState) -> None:
             positions = dict(zip(msg.name, msg.position))
             if not all(name in positions for name in PANDA_JOINT_NAMES):
                 return
-            # Green RViz marker should show the hand link, not the extra tool-tip offset.
+            # FK is used directly in fk mode and as a fallback if TF is unavailable.
             q = np.array([positions[name] for name in PANDA_JOINT_NAMES], dtype=float)
-            self.hand_pos = hand_position(q)
+            self.fk_ee_pos = forward_kinematics(q)
 
         def _sample_path(self) -> list[Point]:
             points = []
@@ -103,6 +122,27 @@ def main() -> None:
         def _path_bounds(self) -> tuple[np.ndarray, np.ndarray]:
             points = np.array([[point.x, point.y, point.z] for point in self.path_points], dtype=float)
             return points.min(axis=0), points.max(axis=0)
+
+        def _tf_ee_position(self) -> np.ndarray | None:
+            if self.tf_buffer is None:
+                return None
+            try:
+                transform = self.tf_buffer.lookup_transform(args.frame_id, args.ee_frame, Time())
+            except TransformException as exc:
+                self.last_tf_error = str(exc)
+                return None
+            translation = transform.transform.translation
+            self.last_tf_error = None
+            return np.array([translation.x, translation.y, translation.z], dtype=float)
+
+        def _current_ee_position(self) -> np.ndarray | None:
+            if args.ee_source == "none":
+                return None
+            if args.ee_source == "tf":
+                tf_pos = self._tf_ee_position()
+                if tf_pos is not None:
+                    return tf_pos
+            return self.fk_ee_pos
 
         def _base_marker(self, marker_id: int, marker_type: int) -> Marker:
             # RViz/Isaac identify markers by namespace and id; reusing ids updates old markers.
@@ -144,21 +184,22 @@ def main() -> None:
             target.color.a = 0.95
 
             markers = [path, target]
-            if self.hand_pos is not None:
-                # Green: current hand-link estimate from joint states.
-                hand = self._base_marker(2, Marker.SPHERE)
-                hand.pose.position.x = float(self.hand_pos[0])
-                hand.pose.position.y = float(self.hand_pos[1])
-                hand.pose.position.z = float(self.hand_pos[2])
-                hand.scale.x = 0.04
-                hand.scale.y = 0.04
-                hand.scale.z = 0.04
-                hand.color.r = 0.05
-                hand.color.g = 0.9
-                hand.color.b = 0.25
-                hand.color.a = 0.95
+            ee_pos = self._current_ee_position()
+            if ee_pos is not None:
+                # Green: current end-effector position from TF, or FK fallback.
+                ee = self._base_marker(2, Marker.SPHERE)
+                ee.pose.position.x = float(ee_pos[0])
+                ee.pose.position.y = float(ee_pos[1])
+                ee.pose.position.z = float(ee_pos[2])
+                ee.scale.x = 0.04
+                ee.scale.y = 0.04
+                ee.scale.z = 0.04
+                ee.color.r = 0.05
+                ee.color.g = 0.9
+                ee.color.b = 0.25
+                ee.color.a = 0.95
 
-                # Yellow: instantaneous offset between hand marker and target.
+                # Yellow: instantaneous tracking error between actual EE and target.
                 error = self._base_marker(3, Marker.LINE_STRIP)
                 error.scale.x = 0.006
                 error.color.r = 1.0
@@ -166,10 +207,10 @@ def main() -> None:
                 error.color.b = 0.0
                 error.color.a = 0.85
                 error.points = [
-                    Point(x=float(self.hand_pos[0]), y=float(self.hand_pos[1]), z=float(self.hand_pos[2])),
+                    Point(x=float(ee_pos[0]), y=float(ee_pos[1]), z=float(ee_pos[2])),
                     Point(x=float(target_pos[0]), y=float(target_pos[1]), z=float(target_pos[2])),
                 ]
-                markers.extend([hand, error])
+                markers.extend([ee, error])
 
             self.publisher.publish(MarkerArray(markers=markers))
 
@@ -181,7 +222,12 @@ def main() -> None:
             else:
                 self.get_logger().info(f"{subscribers} subscriber(s) connected on {args.topic}.")
             if joint_publishers == 0:
-                self.get_logger().warn(f"No publishers on {args.joint_states_topic}; actual hand marker is unavailable.")
+                self.get_logger().warn(f"No publishers on {args.joint_states_topic}; actual end-effector marker is unavailable.")
+            if args.ee_source == "tf" and self.last_tf_error is not None:
+                self.get_logger().warn(
+                    f"TF end-effector lookup failed for {args.frame_id} <- {args.ee_frame}; "
+                    f"falling back to FK marker. Last error: {self.last_tf_error}"
+                )
 
     rclpy.init()
     node = TrajectoryVisualizer()

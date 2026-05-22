@@ -9,6 +9,12 @@ import rclpy
 import torch
 
 from ..algorithms.sac import ReplayBuffer, SACConfig, TorchSACAgent
+from ..core.trajectories import (
+    DEFAULT_TRAJECTORY_CENTER,
+    DEFAULT_TRAJECTORY_PERIOD,
+    DEFAULT_TRAJECTORY_RADIUS,
+    TRAJECTORY_KINDS,
+)
 from ..envs.isaac import IsaacEnvConfig, IsaacFrankaTrackingEnv
 
 
@@ -18,7 +24,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-dir", default="runs/torch_isaac")
     parser.add_argument("--save-freq", type=int, default=10_000)
     parser.add_argument("--log-freq", type=int, default=100)
-    parser.add_argument("--trajectory", choices=["circle", "figure8", "horizontal8"], default="figure8")
+    parser.add_argument("--trajectory", choices=TRAJECTORY_KINDS, default="figure8")
+    parser.add_argument(
+        "--trajectory-center",
+        nargs=3,
+        type=float,
+        default=DEFAULT_TRAJECTORY_CENTER,
+        metavar=("X", "Y", "Z"),
+    )
+    parser.add_argument("--trajectory-radius", type=float, default=DEFAULT_TRAJECTORY_RADIUS)
+    parser.add_argument("--trajectory-period", type=float, default=DEFAULT_TRAJECTORY_PERIOD)
+    parser.add_argument("--trajectory-unreachable", action="store_true")
     parser.add_argument("--controller-topic", default="/isaac_joint_commands")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
     parser.add_argument(
@@ -84,6 +100,10 @@ def main() -> None:
         dt=args.dt,
         horizon=args.horizon,
         trajectory=args.trajectory,
+        trajectory_center=tuple(args.trajectory_center),
+        trajectory_radius=args.trajectory_radius,
+        trajectory_period=args.trajectory_period,
+        trajectory_unreachable=args.trajectory_unreachable,
         obs_noise=args.obs_noise,
         action_noise=args.action_noise,
         action_accel_scale=args.action_accel_scale if args.residual_scale is None else args.residual_scale,

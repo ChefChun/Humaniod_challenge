@@ -3,16 +3,46 @@ from dataclasses import dataclass
 import numpy as np
 
 
+TRAJECTORY_KINDS = ("circle", "figure8", "horizontal8")
+DEFAULT_TRAJECTORY_CENTER = (0.42, 0.0, 0.46)
+DEFAULT_TRAJECTORY_RADIUS = 0.08
+DEFAULT_TRAJECTORY_PERIOD = 6.0
+
+
 # The target trajectory is a moving point in Cartesian space, not a joint-space path.
 # Training and policy_runner both call target_at(t, cfg) to know where the robot
 # end effector should be at the current time.
 @dataclass(frozen=True)
 class TrajectoryConfig:
     kind: str = "figure8"
-    center: tuple[float, float, float] = (0.02, 0.47, 0.36)
-    radius: float = 0.08
-    period: float = 6.0
+    center: tuple[float, float, float] = DEFAULT_TRAJECTORY_CENTER
+    radius: float = DEFAULT_TRAJECTORY_RADIUS
+    period: float = DEFAULT_TRAJECTORY_PERIOD
     unreachable: bool = False
+
+
+def make_trajectory_config(
+    kind: str = "figure8",
+    center: tuple[float, float, float] | list[float] = DEFAULT_TRAJECTORY_CENTER,
+    radius: float = DEFAULT_TRAJECTORY_RADIUS,
+    period: float = DEFAULT_TRAJECTORY_PERIOD,
+    unreachable: bool = False,
+) -> TrajectoryConfig:
+    """Build and validate a trajectory config from CLI/JSON-friendly values."""
+    center_values = tuple(float(value) for value in center)
+    if len(center_values) != 3:
+        raise ValueError(f"Trajectory center must have 3 values, got {len(center_values)}")
+    if radius < 0.0:
+        raise ValueError(f"Trajectory radius must be non-negative, got {radius}")
+    if period <= 0.0:
+        raise ValueError(f"Trajectory period must be positive, got {period}")
+    return TrajectoryConfig(
+        kind=kind,
+        center=center_values,
+        radius=float(radius),
+        period=float(period),
+        unreachable=bool(unreachable),
+    )
 
 
 def target_at(t: float, cfg: TrajectoryConfig) -> tuple[np.ndarray, np.ndarray, float]:
@@ -38,13 +68,13 @@ def target_at(t: float, cfg: TrajectoryConfig) -> tuple[np.ndarray, np.ndarray, 
             ]
         )
     elif cfg.kind in {"horizontal8", "vertical8"}:
-        # Large horizontal figure-eight above the Franka. With the default center,
-        # x spans about -0.18-0.22 m, y spans about 0.30-0.60 m, and z stays at 0.58 m.
-        x_amp = 2.5 * radius
-        y_amp = 1.9 * radius
-        y_offset = -0.02
-        z_lift = 0.22
-        pos = center + np.array([x_amp * np.sin(phase), y_offset + y_amp * np.sin(2.0 * phase), z_lift])
+        # Horizontal figure-eight in the Panda base x-y plane at constant center z.
+        # The default path is shifted forward so the arm reaches farther from the base
+        # while keeping the outer lobe inside the Panda workspace.
+        x_offset = 1.75 * radius
+        x_amp = 3.0 * radius
+        y_amp = 2.3 * radius
+        pos = center + np.array([x_offset + x_amp * np.sin(phase), y_amp * np.sin(2.0 * phase), 0.0])
         vel = np.array(
             [
                 x_amp * omega * np.cos(phase),

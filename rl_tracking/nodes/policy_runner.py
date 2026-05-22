@@ -8,7 +8,14 @@ import torch
 from ..algorithms.sac import TorchSACAgent
 from ..core.control import integrate_joint_acceleration, policy_acceleration_command
 from ..core.kinematics import PANDA_JOINT_NAMES, forward_kinematics
-from ..core.trajectories import TrajectoryConfig, target_at
+from ..core.trajectories import (
+    DEFAULT_TRAJECTORY_CENTER,
+    DEFAULT_TRAJECTORY_PERIOD,
+    DEFAULT_TRAJECTORY_RADIUS,
+    TRAJECTORY_KINDS,
+    make_trajectory_config,
+    target_at,
+)
 from ..envs.isaac import make_observation
 
 
@@ -37,7 +44,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--controller-topic", default="/isaac_joint_commands")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
     parser.add_argument("--dt", type=float, default=0.08)
-    parser.add_argument("--trajectory", choices=["circle", "figure8", "horizontal8"])
+    parser.add_argument("--trajectory", choices=TRAJECTORY_KINDS)
+    parser.add_argument("--trajectory-center", nargs=3, type=float, metavar=("X", "Y", "Z"))
+    parser.add_argument("--trajectory-radius", type=float)
+    parser.add_argument("--trajectory-period", type=float)
+    parser.add_argument("--trajectory-unreachable", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--max-joint-speed", type=float)
     parser.add_argument("--max-joint-accel", type=float)
     parser.add_argument("--max-joint-jerk", type=float)
@@ -68,7 +79,29 @@ def main() -> None:
     args = parse_args()
     policy = TorchPolicyAdapter(args.model)
     env_config = load_env_config(args.config, args.model)
-    trajectory_kind = args.trajectory or env_config.get("trajectory", "figure8")
+    trajectory_cfg = make_trajectory_config(
+        kind=args.trajectory or env_config.get("trajectory", "figure8"),
+        center=(
+            args.trajectory_center
+            if args.trajectory_center is not None
+            else env_config.get("trajectory_center", DEFAULT_TRAJECTORY_CENTER)
+        ),
+        radius=(
+            args.trajectory_radius
+            if args.trajectory_radius is not None
+            else env_config.get("trajectory_radius", DEFAULT_TRAJECTORY_RADIUS)
+        ),
+        period=(
+            args.trajectory_period
+            if args.trajectory_period is not None
+            else env_config.get("trajectory_period", DEFAULT_TRAJECTORY_PERIOD)
+        ),
+        unreachable=(
+            args.trajectory_unreachable
+            if args.trajectory_unreachable is not None
+            else env_config.get("trajectory_unreachable", False)
+        ),
+    )
     max_joint_speed = args.max_joint_speed if args.max_joint_speed is not None else float(env_config.get("max_joint_speed", 0.8))
     max_joint_accel = args.max_joint_accel if args.max_joint_accel is not None else float(env_config.get("max_joint_accel", 2.5))
     max_joint_jerk = args.max_joint_jerk if args.max_joint_jerk is not None else float(env_config.get("max_joint_jerk", 18.0))
@@ -108,7 +141,7 @@ def main() -> None:
         def publish_command(self) -> None:
             assert self.q is not None
             elapsed = (self.get_clock().now() - self.start_time).nanoseconds * 1e-9
-            target_pos, target_vel, phase = target_at(elapsed, TrajectoryConfig(kind=trajectory_kind))
+            target_pos, target_vel, phase = target_at(elapsed, trajectory_cfg)
             ee_pos = forward_kinematics(self.q)
             # Reuse the exact observation builder from training so the policy sees familiar inputs.
             obs = make_observation(

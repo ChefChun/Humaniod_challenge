@@ -6,6 +6,9 @@ import numpy as np
 # - Given 7 joint angles, where is the end effector?        forward_kinematics()
 # - Given 7 joint angles, where is the hand link?           hand_position()
 # - Given a target Cartesian velocity, how should joints move? damped_velocity_ik()
+PANDA_BASE_FRAME = "panda_link0"
+PANDA_EE_FRAME = "panda_hand"
+
 PANDA_JOINT_NAMES = [
     "panda_joint1",
     "panda_joint2",
@@ -21,46 +24,89 @@ PANDA_Q_MAX = np.array([2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973]
 PANDA_Q_HOME = np.array([0.0, -0.45, 0.0, -2.2, 0.0, 1.75, 0.75])
 
 
-def _dh(a: float, alpha: float, d: float, theta: float) -> np.ndarray:
-    # Denavit-Hartenberg transform for one robot link: joint angle -> local link transform.
-    ca, sa = np.cos(alpha), np.sin(alpha)
-    ct, st = np.cos(theta), np.sin(theta)
+def _translation(x: float, y: float, z: float) -> np.ndarray:
+    transform = np.eye(4)
+    transform[:3, 3] = [x, y, z]
+    return transform
+
+
+def _rotation_x(angle: float) -> np.ndarray:
+    ca, sa = np.cos(angle), np.sin(angle)
     return np.array(
         [
-            [ct, -st * ca, st * sa, a * ct],
-            [st, ct * ca, -ct * sa, a * st],
-            [0.0, sa, ca, d],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, ca, -sa, 0.0],
+            [0.0, sa, ca, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ],
         dtype=float,
     )
 
 
-def _panda_wrist_transform(q: np.ndarray) -> np.ndarray:
-    q = np.asarray(q, dtype=float)
-    # These DH parameters approximate the Franka arm link geometry.
-    a = np.array([0.0, 0.0, 0.0, 0.0825, -0.0825, 0.0, 0.088])
-    d = np.array([0.333, 0.0, 0.316, 0.0, 0.384, 0.0, 0.107])
-    alpha = np.array([0.0, -np.pi / 2, np.pi / 2, np.pi / 2, -np.pi / 2, np.pi / 2, np.pi / 2])
+def _rotation_y(angle: float) -> np.ndarray:
+    ca, sa = np.cos(angle), np.sin(angle)
+    return np.array(
+        [
+            [ca, 0.0, sa, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [-sa, 0.0, ca, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
 
-    # Multiply link transforms from the robot base to the wrist.
+
+def _rotation_z(angle: float) -> np.ndarray:
+    ca, sa = np.cos(angle), np.sin(angle)
+    return np.array(
+        [
+            [ca, -sa, 0.0, 0.0],
+            [sa, ca, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+
+
+def _rpy(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    return _rotation_z(yaw) @ _rotation_y(pitch) @ _rotation_x(roll)
+
+
+def _panda_hand_transform(q: np.ndarray) -> np.ndarray:
+    """Standard MoveIt/franka_description Panda base-to-hand transform."""
+    q = np.asarray(q, dtype=float)
+    if q.shape != (7,):
+        raise ValueError(f"Expected 7 Panda joints, got shape {q.shape}")
+
+    origins = [
+        ((0.0, 0.0, 0.333), (0.0, 0.0, 0.0)),
+        ((0.0, 0.0, 0.0), (-np.pi / 2.0, 0.0, 0.0)),
+        ((0.0, -0.316, 0.0), (np.pi / 2.0, 0.0, 0.0)),
+        ((0.0825, 0.0, 0.0), (np.pi / 2.0, 0.0, 0.0)),
+        ((-0.0825, 0.384, 0.0), (-np.pi / 2.0, 0.0, 0.0)),
+        ((0.0, 0.0, 0.0), (np.pi / 2.0, 0.0, 0.0)),
+        ((0.088, 0.0, 0.0), (np.pi / 2.0, 0.0, 0.0)),
+    ]
+
     transform = np.eye(4)
-    for i in range(7):
-        transform = transform @ _dh(a[i], alpha[i], d[i], q[i])
+    for (xyz, rpy), joint_angle in zip(origins, q):
+        transform = transform @ _translation(*xyz) @ _rpy(*rpy) @ _rotation_z(joint_angle)
+
+    # Fixed panda_link8 and panda_hand transforms from franka_description.
+    transform = transform @ _translation(0.0, 0.0, 0.107)
+    transform = transform @ _translation(0.0, 0.0, 0.1034) @ _rpy(0.0, 0.0, -np.pi / 4.0)
     return transform
 
 
 def hand_position(q: np.ndarray) -> np.ndarray:
     """Approximate Franka hand-link position from 7 joint angles."""
-    return _panda_wrist_transform(q)[:3, 3]
+    return _panda_hand_transform(q)[:3, 3]
 
 
 def forward_kinematics(q: np.ndarray) -> np.ndarray:
     """Approximate Franka Panda end-effector position from 7 joint angles."""
-    transform = _panda_wrist_transform(q)
-    # Add a small tool offset so the reported point is closer to the end-effector tip.
-    tool_offset = np.array([0.0, 0.0, 0.103, 1.0])
-    return (transform @ tool_offset)[:3]
+    return hand_position(q)
 
 
 def numerical_jacobian(q: np.ndarray, eps: float = 1e-4) -> np.ndarray:

@@ -16,7 +16,15 @@ from ..core.kinematics import (
     joint_limit_cost,
     numerical_jacobian,
 )
-from ..core.trajectories import TrajectoryConfig, closest_target_on_trajectory, target_at
+from ..core.trajectories import (
+    DEFAULT_TRAJECTORY_CENTER,
+    DEFAULT_TRAJECTORY_PERIOD,
+    DEFAULT_TRAJECTORY_RADIUS,
+    TrajectoryConfig,
+    closest_target_on_trajectory,
+    make_trajectory_config,
+    target_at,
+)
 
 
 # Training-time data flow:
@@ -67,6 +75,10 @@ class IsaacEnvConfig:
     dt: float = 0.08
     horizon: int = 180
     trajectory: str = "figure8"
+    trajectory_center: tuple[float, float, float] = DEFAULT_TRAJECTORY_CENTER
+    trajectory_radius: float = DEFAULT_TRAJECTORY_RADIUS
+    trajectory_period: float = DEFAULT_TRAJECTORY_PERIOD
+    trajectory_unreachable: bool = False
     obs_noise: float = 0.001
     action_noise: float = 0.01
     action_accel_scale: float = 1.0
@@ -197,8 +209,17 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.tracking_start_time: float | None = None
         self.step_count = 0
         self.t = 0.0
-        self.trajectory_cfg = TrajectoryConfig(kind=config.trajectory)
+        self.trajectory_cfg = self._make_trajectory_config()
         self._wait_for_joint_state()
+
+    def _make_trajectory_config(self) -> TrajectoryConfig:
+        return make_trajectory_config(
+            kind=self.config.trajectory,
+            center=self.config.trajectory_center,
+            radius=self.config.trajectory_radius,
+            period=self.config.trajectory_period,
+            unreachable=self.config.trajectory_unreachable,
+        )
 
     def _refresh_collision_subscriptions(self) -> None:
         if self._node is None:
@@ -404,7 +425,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.collision_magnitude = max(self.collision_magnitudes.values(), default=0.0)
         self.collision_count = 0
         self.tracking_start_time = 0.0 if self.reward_mode == "timed" else None
-        self.trajectory_cfg = TrajectoryConfig(kind=self.config.trajectory)
+        self.trajectory_cfg = self._make_trajectory_config()
 
         random_offset = self.rng.normal(0.0, 0.025, size=7)
         reset_q = np.clip(PANDA_Q_HOME + random_offset, PANDA_Q_MIN, PANDA_Q_MAX)

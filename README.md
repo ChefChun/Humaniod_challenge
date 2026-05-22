@@ -44,6 +44,17 @@ python -m rl_tracking.training.torch_isaac \
   --total-timesteps 200000
 ```
 
+The trajectory kind, center, radius, period, and unreachable stress segment are
+saved in `isaac_env_config.json` and reused by the policy runner:
+
+```bash
+python -m rl_tracking.training.torch_isaac \
+  --trajectory figure8 \
+  --trajectory-center 0.42 0.0 0.46 \
+  --trajectory-radius 0.08 \
+  --trajectory-period 6.0
+```
+
 By default, training auto-subscribes to visible `/collision/...` component topics as
 `std_msgs/msg/Bool`, falling back to `/collision` if no component topics are visible yet.
 You can also repeat `--collision-topic` to set the list explicitly. A collision subtracts
@@ -125,6 +136,21 @@ After training:
 python -m rl_tracking.nodes.policy_runner --model runs/torch_isaac/final_model.pt
 ```
 
+## Run A Direct IK Trajectory Test
+
+To test the trajectory and command topics without RL, run the kinematic runner:
+
+```bash
+python -m rl_tracking.nodes.kinematic_runner --trajectory horizontal8
+```
+
+For the MoveIt Panda model, the default trajectory center is in `panda_link0`
+coordinates near the nominal `panda_hand` pose. The horizontal figure-eight keeps
+`z` constant at the configured center height and is shifted forward from that
+center so the arm has to reach farther while staying inside the Panda workspace.
+The kinematic runner first moves to the nearest point on the path, then starts
+advancing along the trajectory.
+
 ## Visualize The Target Trajectory
 
 Publish the configured target path and the moving target point as ROS2 visualization markers:
@@ -138,6 +164,17 @@ For the larger horizontal figure-eight:
 ```bash
 python -m rl_tracking.nodes.trajectory_visualizer --trajectory horizontal8 --frame-id panda_link0
 ```
+
+Use the same `--center`, `--radius`, `--period`, and `--unreachable` values here
+when visualizing a custom training trajectory.
+The green end-effector marker uses TF from `panda_link0` to `panda_hand` by
+default and falls back to the local FK estimate if TF is unavailable. If your
+Isaac scene does not publish TF, add a ROS2 Publish Transform Tree node for
+`/Franka` or run the visualizer with `--ee-source fk`.
+The orange moving target marker has its own clock; the kinematic runner may not
+be phase-synchronized with it because it starts from the nearest path point.
+Use the blue path for geometric tracking checks, or run the runner with
+`--start-mode fixed --approach-duration 0` when you need phase-zero comparison.
 
 The marker topic is:
 

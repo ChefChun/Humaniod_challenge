@@ -59,8 +59,13 @@ Targets are analytic functions of time:
 
 - `circle`: circular path in the end-effector `y-z` plane
 - `figure8`: Lissajous-style figure-eight in the `y-z` plane
+- `horizontal8`: Lissajous-style figure-eight in the `x-y` plane
 
-The target state includes both desired position and desired velocity.
+The target state includes both desired position and desired velocity. Training,
+deployment, and visualization all use the same configurable trajectory center,
+radius, period, and optional unreachable stress segment. The default center is
+defined in the MoveIt/franka_description Panda base frame, `panda_link0`, near
+the nominal `panda_hand` pose.
 
 ## Uncertainty
 
