@@ -21,6 +21,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trajectory", choices=["circle", "figure8", "horizontal8"], default="figure8")
     parser.add_argument("--controller-topic", default="/isaac_joint_commands")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
+    parser.add_argument("--collision-topic", default="/collision")
+    parser.add_argument("--collision-msg-type", default="std_msgs/msg/Bool")
+    parser.add_argument("--collision-threshold", type=float, default=0.0)
+    parser.add_argument("--collision-penalty", type=float, default=20.0)
+    parser.add_argument("--no-terminate-on-collision", action="store_true")
     parser.add_argument("--dt", type=float, default=0.08)
     parser.add_argument("--horizon", type=int, default=180)
     parser.add_argument("--settle-timeout", type=float, default=20.0)
@@ -82,6 +87,11 @@ def main() -> None:
         trajectory_projection_samples=args.trajectory_projection_samples,
         controller_topic=args.controller_topic,
         joint_states_topic=args.joint_states_topic,
+        collision_topic=args.collision_topic,
+        collision_msg_type=args.collision_msg_type,
+        collision_threshold=args.collision_threshold,
+        collision_penalty=args.collision_penalty,
+        terminate_on_collision=not args.no_terminate_on_collision,
         settle_timeout=args.settle_timeout,
         seed=args.seed,
     )
@@ -134,6 +144,10 @@ def main() -> None:
                 "position_reward",
                 "smoothness",
                 "jerk_norm",
+                "in_collision",
+                "collision_magnitude",
+                "collision_count",
+                "collision_penalty",
                 "command_velocity_norm",
                 "acceleration_norm",
                 "actor_loss",
@@ -149,6 +163,12 @@ def main() -> None:
             print(f"device: {device}")
             print(f"controller_topic: {env_config.controller_topic}")
             print(f"joint_states_topic: {env_config.joint_states_topic}")
+            print(
+                f"collision_topic: {env_config.collision_topic} "
+                f"type={env_config.collision_msg_type} "
+                f"penalty={env_config.collision_penalty} "
+                f"terminate={env_config.terminate_on_collision}"
+            )
             print(
                 "control: RL acceleration policy "
                 f"max_speed={env_config.max_joint_speed} "
@@ -194,6 +214,9 @@ def main() -> None:
                     writer.add_scalar("reward/position", info.get("position_reward", 0.0), step)
                     writer.add_scalar("tracking/smoothness", info.get("smoothness", 0.0), step)
                     writer.add_scalar("tracking/jerk_norm", info.get("jerk_norm", 0.0), step)
+                    writer.add_scalar("safety/in_collision", float(info.get("in_collision", False)), step)
+                    writer.add_scalar("safety/collision_magnitude", info.get("collision_magnitude", 0.0), step)
+                    writer.add_scalar("reward/collision_penalty", info.get("collision_penalty", 0.0), step)
                     # Control norms reveal saturation even when reward still appears to improve.
                     writer.add_scalar(
                         "control/command_velocity_norm",
@@ -224,6 +247,10 @@ def main() -> None:
                         "position_reward": info.get("position_reward", 0.0),
                         "smoothness": info.get("smoothness", 0.0),
                         "jerk_norm": info.get("jerk_norm", 0.0),
+                        "in_collision": int(bool(info.get("in_collision", False))),
+                        "collision_magnitude": info.get("collision_magnitude", 0.0),
+                        "collision_count": info.get("collision_count", 0),
+                        "collision_penalty": info.get("collision_penalty", 0.0),
                         "command_velocity_norm": float(np.linalg.norm(info.get("command_velocity", np.zeros(7)))),
                         "acceleration_norm": float(np.linalg.norm(info.get("acceleration", np.zeros(7)))),
                         "actor_loss": last_losses.get("actor_loss", 0.0),
@@ -236,7 +263,8 @@ def main() -> None:
                     print(
                         f"step={step} ep={episode_idx} "
                         f"reward={reward:.3f} err={row['tracking_error']:.4f} "
-                        f"smooth={row['smoothness']:.4f} return={episode_return:.2f}"
+                        f"smooth={row['smoothness']:.4f} collision={row['in_collision']} "
+                        f"return={episode_return:.2f}"
                     )
 
                 if step % args.save_freq == 0:

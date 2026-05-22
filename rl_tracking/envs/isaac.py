@@ -21,10 +21,11 @@ from ..core.trajectories import TrajectoryConfig, closest_target_on_trajectory, 
 
 # Training-time data flow:
 # 1. Isaac Sim publishes /isaac_joint_states as sensor_msgs/JointState.
-# 2. _joint_state_cb stores those joint positions/velocities in self.q and self.qd.
-# 3. make_observation packs robot state, target state, tracking error, and previous acceleration.
-# 4. SAC reads that observation and outputs a normalized 7D action.
-# 5. step() treats that action as the main joint acceleration command, integrates to velocity/position,
+# 2. Isaac contact sensors publish /collision; _collision_cb stores whether this step is unsafe.
+# 3. _joint_state_cb stores those joint positions/velocities in self.q and self.qd.
+# 4. make_observation packs robot state, target state, tracking error, and previous acceleration.
+# 5. SAC reads that observation and outputs a normalized 7D action.
+# 6. step() treats that action as the main joint acceleration command, integrates to velocity/position,
 #    then publishes /isaac_joint_commands back to Isaac Sim.
 def make_observation(
     q: np.ndarray,
@@ -75,10 +76,43 @@ class IsaacEnvConfig:
     trajectory_projection_samples: int = 180
     controller_topic: str = "/isaac_joint_commands"
     joint_states_topic: str = "/isaac_joint_states"
+    collision_topic: str = "/collision"
+    collision_msg_type: str = "std_msgs/msg/Bool"
+    collision_threshold: float = 0.0
+    collision_penalty: float = 20.0
+    terminate_on_collision: bool = True
     reset_duration: float = 2.0
     command_duration: float = 0.12
     settle_timeout: float = 20.0
     seed: int = 7
+
+
+def _load_ros_message_type(type_name: str):
+    normalized = type_name.replace(".", "/")
+    if normalized == "Bool":
+        normalized = "std_msgs/msg/Bool"
+    try:
+        from rosidl_runtime_py.utilities import get_message
+
+        return get_message(normalized)
+    except Exception:
+        if normalized == "std_msgs/msg/Bool":
+            from std_msgs.msg import Bool
+
+            return Bool
+        if normalized == "std_msgs/msg/Float32":
+            from std_msgs.msg import Float32
+
+            return Float32
+        if normalized == "std_msgs/msg/Float64":
+            from std_msgs.msg import Float64
+
+            return Float64
+        if normalized == "geometry_msgs/msg/WrenchStamped":
+            from geometry_msgs.msg import WrenchStamped
+
+            return WrenchStamped
+        raise
 
 
 class IsaacFrankaTrackingEnv(gym.Env):
@@ -125,11 +159,21 @@ class IsaacFrankaTrackingEnv(gym.Env):
             self._joint_state_cb,
             qos,
         )
+        collision_msg_cls = _load_ros_message_type(config.collision_msg_type)
+        self._collision_sub = self._node.create_subscription(
+            collision_msg_cls,
+            config.collision_topic,
+            self._collision_cb,
+            qos,
+        )
 
         self.q: np.ndarray | None = None
         self.qd = np.zeros(7, dtype=float)
         self.command_velocity = np.zeros(7, dtype=float)
         self.prev_acceleration = np.zeros(7, dtype=float)
+        self.in_collision = False
+        self.collision_magnitude = 0.0
+        self.collision_count = 0
         self.reward_mode = "trajectory"
         self.tracking_start_time: float | None = None
         self.step_count = 0
@@ -145,6 +189,47 @@ class IsaacFrankaTrackingEnv(gym.Env):
             return
         self.q = np.array([positions[name] for name in PANDA_JOINT_NAMES], dtype=float)
         self.qd = np.array([velocities.get(name, 0.0) for name in PANDA_JOINT_NAMES], dtype=float)
+
+    def _collision_cb(self, msg) -> None:
+        # /collision is the safety signal from Isaac contact sensors. A bool topic is
+        # expected, but numeric/contact-force messages are handled so the reward logic
+        # does not need to change if the publisher becomes more detailed later.
+        in_collision, magnitude = self._parse_collision_message(msg)
+        self.in_collision = in_collision
+        self.collision_magnitude = magnitude
+        if in_collision:
+            self.collision_count += 1
+
+    def _parse_collision_message(self, msg) -> tuple[bool, float]:
+        if hasattr(msg, "data"):
+            data = msg.data
+            if isinstance(data, bool):
+                return data, 1.0 if data else 0.0
+            magnitude = abs(float(data))
+            return magnitude > self.config.collision_threshold, magnitude
+
+        if hasattr(msg, "wrench"):
+            force = msg.wrench.force
+            torque = msg.wrench.torque
+            magnitude = float(
+                np.linalg.norm([force.x, force.y, force.z]) + np.linalg.norm([torque.x, torque.y, torque.z])
+            )
+            return magnitude > self.config.collision_threshold, magnitude
+
+        if hasattr(msg, "force"):
+            force = msg.force
+            magnitude = float(np.linalg.norm([force.x, force.y, force.z]))
+            return magnitude > self.config.collision_threshold, magnitude
+
+        if hasattr(msg, "contacts"):
+            count = float(len(msg.contacts))
+            return count > self.config.collision_threshold, count
+
+        if hasattr(msg, "states"):
+            count = float(len(msg.states))
+            return count > self.config.collision_threshold, count
+
+        return False, 0.0
 
     def _spin_for(self, duration: float) -> None:
         deadline = time.time() + duration
@@ -239,6 +324,9 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.t = 0.0
         self.command_velocity = np.zeros(7, dtype=float)
         self.prev_acceleration = np.zeros(7, dtype=float)
+        self.in_collision = False
+        self.collision_magnitude = 0.0
+        self.collision_count = 0
         self.tracking_start_time = 0.0 if self.reward_mode == "timed" else None
         self.trajectory_cfg = TrajectoryConfig(kind=self.config.trajectory)
 
@@ -336,6 +424,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
         smoothness = float(np.linalg.norm(acceleration_delta))
         jerk_norm = smoothness / self.config.dt
         limit_penalty = joint_limit_cost(self.q)
+        collision_penalty = self.config.collision_penalty if self.in_collision else 0.0
 
         # Two-phase reward:
         # trajectory mode: stay near the geometric path and move along its tangent;
@@ -347,10 +436,11 @@ class IsaacFrankaTrackingEnv(gym.Env):
             - 0.015 * float(np.dot(acceleration, acceleration))
             - 0.05 * smoothness
             - 6.0 * limit_penalty
+            - collision_penalty
         )
 
         self.prev_acceleration = acceleration.copy()
-        terminated = False
+        terminated = self.config.terminate_on_collision and self.in_collision
         truncated = self.step_count >= self.config.horizon
         info = {
             "time": self.t,
@@ -373,6 +463,10 @@ class IsaacFrankaTrackingEnv(gym.Env):
             "acceleration": acceleration,
             "command_velocity": command_velocity,
             "command": command_velocity,
+            "in_collision": self.in_collision,
+            "collision_magnitude": self.collision_magnitude,
+            "collision_count": self.collision_count,
+            "collision_penalty": collision_penalty,
             "is_success": error < 0.035,
         }
         return self._observe(), float(reward), terminated, truncated, info

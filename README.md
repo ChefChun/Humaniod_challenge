@@ -3,9 +3,10 @@
 This folder contains a focused SAC baseline for training a Franka arm in Isaac Sim:
 
 - Franka 7-DoF arm driven through Isaac ROS2 topics
-- Time-varying Cartesian targets: circle, figure-eight, or larger vertical figure-eight
+- Time-varying Cartesian targets: circle, figure-eight, or larger horizontal figure-eight
 - Reinforcement learning core: custom PyTorch SAC
 - Smooth control: learned joint-acceleration policy with velocity, acceleration, and jerk limits
+- Safety: optional collision penalty from Isaac contact sensors on `/collision`
 - Uncertainty: observation and action noise
 - Metrics: tracking error, command smoothness, and success flag logged to TensorBoard
 
@@ -14,6 +15,7 @@ The expected Isaac topics are:
 ```text
 /isaac_joint_states
 /isaac_joint_commands
+/collision
 ```
 
 ## Install
@@ -34,13 +36,25 @@ Launch Isaac Sim first, confirm the topics exist with `ros2 topic list`, then ru
 python -m rl_tracking.training.torch_isaac --total-timesteps 200000
 ```
 
-To train on the larger vertical figure-eight:
+To train on the larger horizontal figure-eight:
 
 ```bash
 python -m rl_tracking.training.torch_isaac \
   --trajectory horizontal8 \
   --total-timesteps 200000
 ```
+
+By default, training subscribes to `/collision` as `std_msgs/msg/Bool`. A collision subtracts
+`--collision-penalty` from the reward and terminates the current episode:
+
+```bash
+python -m rl_tracking.training.torch_isaac \
+  --collision-topic /collision \
+  --collision-msg-type std_msgs/msg/Bool \
+  --collision-penalty 20.0
+```
+
+Use `--no-terminate-on-collision` if you want collisions to reduce reward without ending the episode.
 
 The implementation is organized by responsibility:
 
@@ -115,7 +129,7 @@ Publish the configured target path and the moving target point as ROS2 visualiza
 python -m rl_tracking.nodes.trajectory_visualizer --trajectory figure8 --frame-id world
 ```
 
-For the larger vertical figure-eight:
+For the larger horizontal figure-eight:
 
 ```bash
 python -m rl_tracking.nodes.trajectory_visualizer --trajectory horizontal8 --frame-id world
