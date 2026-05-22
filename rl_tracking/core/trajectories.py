@@ -4,7 +4,7 @@ import numpy as np
 
 
 TRAJECTORY_KINDS = ("circle", "figure8", "horizontal8")
-DEFAULT_TRAJECTORY_CENTER = (0.42, 0.0, 0.46)
+DEFAULT_TRAJECTORY_CENTER = (0.417393680355622, 0.0, 0.455758296155317)
 DEFAULT_TRAJECTORY_RADIUS = 0.08
 DEFAULT_TRAJECTORY_PERIOD = 6.0
 
@@ -69,16 +69,15 @@ def target_at(t: float, cfg: TrajectoryConfig) -> tuple[np.ndarray, np.ndarray, 
         )
     elif cfg.kind in {"horizontal8", "vertical8"}:
         # Horizontal figure-eight in the Panda base x-y plane at constant center z.
-        # The default path is shifted forward so the arm reaches farther from the base
-        # while keeping the outer lobe inside the Panda workspace.
-        x_offset = 1.75 * radius
+        # This is the previous horizontal8 rotated 90 degrees around the z axis,
+        # centered on the nominal Panda home end-effector position.
         x_amp = 3.0 * radius
         y_amp = 2.3 * radius
-        pos = center + np.array([x_offset + x_amp * np.sin(phase), y_amp * np.sin(2.0 * phase), 0.0])
+        pos = center + np.array([-y_amp * np.sin(2.0 * phase), x_amp * np.sin(phase), 0.0])
         vel = np.array(
             [
+                -2.0 * y_amp * omega * np.cos(2.0 * phase),
                 x_amp * omega * np.cos(phase),
-                2.0 * y_amp * omega * np.cos(2.0 * phase),
                 0.0,
             ]
         )
@@ -101,22 +100,41 @@ def closest_target_on_trajectory(
     samples: int = 180,
 ) -> tuple[np.ndarray, np.ndarray, float, float]:
     """Return the sampled trajectory point closest to a Cartesian position."""
+    pos, vel, phase, distance, _ = closest_target_on_trajectory_time(position, cfg, samples=samples)
+    return pos, vel, phase, distance
+
+
+def closest_target_on_trajectory_time(
+    position: np.ndarray,
+    cfg: TrajectoryConfig,
+    samples: int = 180,
+    center_time: float | None = None,
+    search_window: float | None = None,
+) -> tuple[np.ndarray, np.ndarray, float, float, float]:
+    """Return the closest sampled trajectory point and its unwrapped trajectory time."""
     position = np.asarray(position, dtype=float)
     best_pos: np.ndarray | None = None
     best_vel: np.ndarray | None = None
     best_phase = 0.0
+    best_time = 0.0
     best_distance = float("inf")
 
-    for idx in range(samples):
-        t = cfg.period * idx / samples
+    if center_time is None or search_window is None or search_window >= cfg.period:
+        times = (cfg.period * idx / samples for idx in range(samples))
+    else:
+        half_window = 0.5 * search_window
+        times = (center_time - half_window + search_window * idx / max(1, samples - 1) for idx in range(samples))
+
+    for t in times:
         pos, vel, phase = target_at(t, cfg)
         distance = float(np.linalg.norm(pos - position))
         if distance < best_distance:
             best_pos = pos
             best_vel = vel
             best_phase = phase
+            best_time = t
             best_distance = distance
 
     assert best_pos is not None
     assert best_vel is not None
-    return best_pos, best_vel, best_phase, best_distance
+    return best_pos, best_vel, best_phase, best_distance, best_time

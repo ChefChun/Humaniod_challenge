@@ -61,6 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--curriculum-switch-window", type=int, default=5)
     parser.add_argument("--curriculum-switch-trajectory-error", type=float, default=0.045)
     parser.add_argument("--trajectory-projection-samples", type=int, default=180)
+    parser.add_argument("--trajectory-projection-window", type=float, default=1.2)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--buffer-size", type=int, default=300_000)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -111,6 +112,7 @@ def main() -> None:
         max_joint_accel=args.max_joint_accel,
         max_joint_jerk=args.max_joint_jerk,
         trajectory_projection_samples=args.trajectory_projection_samples,
+        trajectory_projection_window=args.trajectory_projection_window,
         controller_topic=args.controller_topic,
         joint_states_topic=args.joint_states_topic,
         collision_topic=collision_topics[0] if collision_topics else "/collision",

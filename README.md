@@ -50,7 +50,7 @@ saved in `isaac_env_config.json` and reused by the policy runner:
 ```bash
 python -m rl_tracking.training.torch_isaac \
   --trajectory figure8 \
-  --trajectory-center 0.42 0.0 0.46 \
+  --trajectory-center 0.4174 0.0 0.4558 \
   --trajectory-radius 0.08 \
   --trajectory-period 6.0
 ```
@@ -146,8 +146,8 @@ python -m rl_tracking.nodes.kinematic_runner --trajectory horizontal8
 
 For the MoveIt Panda model, the default trajectory center is in `panda_link0`
 coordinates near the nominal `panda_hand` pose. The horizontal figure-eight keeps
-`z` constant at the configured center height and is shifted forward from that
-center so the arm has to reach farther while staying inside the Panda workspace.
+`z` constant at the configured center height and starts at that center. Its long
+axis runs side-to-side in the horizontal plane.
 The kinematic runner first moves to the nearest point on the path, then starts
 advancing along the trajectory.
 

@@ -59,7 +59,7 @@ Targets are analytic functions of time:
 
 - `circle`: circular path in the end-effector `y-z` plane
 - `figure8`: Lissajous-style figure-eight in the `y-z` plane
-- `horizontal8`: Lissajous-style figure-eight in the `x-y` plane
+- `horizontal8`: Lissajous-style figure-eight in the `x-y` plane, centered at the nominal home end-effector pose
 
 The target state includes both desired position and desired velocity. Training,
 deployment, and visualization all use the same configurable trajectory center,

@@ -21,7 +21,7 @@ from ..core.trajectories import (
     DEFAULT_TRAJECTORY_PERIOD,
     DEFAULT_TRAJECTORY_RADIUS,
     TrajectoryConfig,
-    closest_target_on_trajectory,
+    closest_target_on_trajectory_time,
     make_trajectory_config,
     target_at,
 )
@@ -86,6 +86,7 @@ class IsaacEnvConfig:
     max_joint_accel: float = 2.5
     max_joint_jerk: float = 18.0
     trajectory_projection_samples: int = 180
+    trajectory_projection_window: float = 1.2
     controller_topic: str = "/isaac_joint_commands"
     joint_states_topic: str = "/isaac_joint_states"
     collision_topic: str = "/collision"
@@ -207,6 +208,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.prev_acceleration = np.zeros(7, dtype=float)
         self.reward_mode = "trajectory"
         self.tracking_start_time: float | None = None
+        self.path_time_estimate: float | None = None
         self.step_count = 0
         self.t = 0.0
         self.trajectory_cfg = self._make_trajectory_config()
@@ -366,6 +368,30 @@ class IsaacFrankaTrackingEnv(gym.Env):
     def _target(self) -> tuple[np.ndarray, np.ndarray, float]:
         return target_at(self._target_time(), self.trajectory_cfg)
 
+    def _closest_path_target(
+        self,
+        ee_pos: np.ndarray,
+        *,
+        update_estimate: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray, float, float]:
+        if self.path_time_estimate is None:
+            target_pos, target_vel, phase, distance, target_time = closest_target_on_trajectory_time(
+                ee_pos,
+                self.trajectory_cfg,
+                samples=self.config.trajectory_projection_samples,
+            )
+        else:
+            target_pos, target_vel, phase, distance, target_time = closest_target_on_trajectory_time(
+                ee_pos,
+                self.trajectory_cfg,
+                samples=self.config.trajectory_projection_samples,
+                center_time=self.path_time_estimate,
+                search_window=self.config.trajectory_projection_window,
+            )
+        if update_estimate:
+            self.path_time_estimate = target_time
+        return target_pos, target_vel, phase, distance
+
     def set_reward_mode(self, mode: str) -> None:
         if mode not in {"trajectory", "timed"}:
             raise ValueError(f"Unknown reward mode: {mode}")
@@ -383,11 +409,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
         assert self.q is not None
         ee_pos = self._ee_position()
         if self.reward_mode == "trajectory":
-            target_pos, target_vel, phase, _ = closest_target_on_trajectory(
-                ee_pos,
-                self.trajectory_cfg,
-                samples=self.config.trajectory_projection_samples,
-            )
+            target_pos, target_vel, phase, _ = self._closest_path_target(ee_pos)
         else:
             target_pos, target_vel, phase = self._target()
         obs = make_observation(
@@ -426,12 +448,15 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.collision_count = 0
         self.tracking_start_time = 0.0 if self.reward_mode == "timed" else None
         self.trajectory_cfg = self._make_trajectory_config()
+        self.path_time_estimate = None
 
         random_offset = self.rng.normal(0.0, 0.025, size=7)
         reset_q = np.clip(PANDA_Q_HOME + random_offset, PANDA_Q_MIN, PANDA_Q_MAX)
         self._publish_position_command(reset_q, np.zeros(7))
         self._spin_for(self.config.reset_duration)
         self._wait_for_joint_state()
+        if self.reward_mode == "trajectory":
+            self._closest_path_target(self._ee_position(), update_estimate=True)
         return self._observe(), {}
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
@@ -445,11 +470,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
 
         ee_pos = self._ee_position()
         if self.reward_mode == "trajectory":
-            target_pos, target_vel, _, _ = closest_target_on_trajectory(
-                ee_pos,
-                self.trajectory_cfg,
-                samples=self.config.trajectory_projection_samples,
-            )
+            target_pos, target_vel, _, _ = self._closest_path_target(ee_pos)
         else:
             target_pos, target_vel, _ = self._target()
         error_vec = target_pos - ee_pos
@@ -485,10 +506,9 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.step_count += 1
 
         ee_after = self._ee_position()
-        closest_target_pos, closest_target_vel, _, trajectory_error = closest_target_on_trajectory(
+        closest_target_pos, closest_target_vel, _, trajectory_error = self._closest_path_target(
             ee_after,
-            self.trajectory_cfg,
-            samples=self.config.trajectory_projection_samples,
+            update_estimate=self.reward_mode == "trajectory",
         )
         ee_velocity = numerical_jacobian(self.q) @ self.qd
 
