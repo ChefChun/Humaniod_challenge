@@ -6,7 +6,7 @@ This folder contains a focused SAC baseline for training a Franka arm in Isaac S
 - Time-varying Cartesian targets: circle, figure-eight, or larger horizontal figure-eight
 - Reinforcement learning core: custom PyTorch SAC
 - Smooth control: learned joint-acceleration policy with velocity, acceleration, and jerk limits
-- Safety: optional collision penalty from Isaac contact sensors on `/collision`
+- Safety: optional collision penalty from Isaac contact sensors on `/collision/*`
 - Uncertainty: observation and action noise
 - Metrics: tracking error, command smoothness, and success flag logged to TensorBoard
 
@@ -15,7 +15,7 @@ The expected Isaac topics are:
 ```text
 /isaac_joint_states
 /isaac_joint_commands
-/collision
+/collision/hand
 ```
 
 ## Install
@@ -44,12 +44,16 @@ python -m rl_tracking.training.torch_isaac \
   --total-timesteps 200000
 ```
 
-By default, training subscribes to `/collision` as `std_msgs/msg/Bool`. A collision subtracts
-`--collision-penalty` from the reward and terminates the current episode:
+By default, training auto-subscribes to visible `/collision/...` component topics as
+`std_msgs/msg/Bool`, falling back to `/collision` if no component topics are visible yet.
+You can also repeat `--collision-topic` to set the list explicitly. A collision subtracts
+`--collision-penalty` from the reward, logs the component name, and terminates the current episode:
 
 ```bash
 python -m rl_tracking.training.torch_isaac \
-  --collision-topic /collision \
+  --collision-topic /collision/hand \
+  --collision-topic /collision/left_finger \
+  --collision-topic /collision/right_finger \
   --collision-msg-type std_msgs/msg/Bool \
   --collision-penalty 20.0
 ```

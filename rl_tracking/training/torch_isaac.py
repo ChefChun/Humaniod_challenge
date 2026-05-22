@@ -21,7 +21,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trajectory", choices=["circle", "figure8", "horizontal8"], default="figure8")
     parser.add_argument("--controller-topic", default="/isaac_joint_commands")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
-    parser.add_argument("--collision-topic", default="/collision")
+    parser.add_argument(
+        "--collision-topic",
+        dest="collision_topics",
+        action="append",
+        help="Collision topic to subscribe to. Repeat for component topics such as /collision/hand.",
+    )
     parser.add_argument("--collision-msg-type", default="std_msgs/msg/Bool")
     parser.add_argument("--collision-threshold", type=float, default=0.0)
     parser.add_argument("--collision-penalty", type=float, default=20.0)
@@ -73,6 +78,7 @@ def main() -> None:
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = save_dir / "training_metrics.csv"
+    collision_topics = tuple(args.collision_topics) if args.collision_topics else ()
 
     env_config = IsaacEnvConfig(
         dt=args.dt,
@@ -87,7 +93,8 @@ def main() -> None:
         trajectory_projection_samples=args.trajectory_projection_samples,
         controller_topic=args.controller_topic,
         joint_states_topic=args.joint_states_topic,
-        collision_topic=args.collision_topic,
+        collision_topic=collision_topics[0] if collision_topics else "/collision",
+        collision_topics=collision_topics,
         collision_msg_type=args.collision_msg_type,
         collision_threshold=args.collision_threshold,
         collision_penalty=args.collision_penalty,
@@ -145,6 +152,7 @@ def main() -> None:
                 "smoothness",
                 "jerk_norm",
                 "in_collision",
+                "collision_components",
                 "collision_magnitude",
                 "collision_count",
                 "collision_penalty",
@@ -164,7 +172,7 @@ def main() -> None:
             print(f"controller_topic: {env_config.controller_topic}")
             print(f"joint_states_topic: {env_config.joint_states_topic}")
             print(
-                f"collision_topic: {env_config.collision_topic} "
+                f"collision_topics: {', '.join(env_config.collision_topics) if env_config.collision_topics else env_config.collision_topic + '/* auto'} "
                 f"type={env_config.collision_msg_type} "
                 f"penalty={env_config.collision_penalty} "
                 f"terminate={env_config.terminate_on_collision}"
@@ -185,7 +193,9 @@ def main() -> None:
             last_losses: dict[str, float] = {}
             reward_mode = "trajectory"
             recent_episode_trajectory_errors: list[float] = []
+            recent_episode_collision_counts: list[int] = []
             episode_trajectory_error_sum = 0.0
+            episode_collision_count = 0
             for step in range(1, args.total_timesteps + 1):
                 if step < args.learning_starts:
                     action = env.action_space.sample()
@@ -200,6 +210,7 @@ def main() -> None:
                 episode_return += reward
                 episode_length += 1
                 episode_trajectory_error_sum += float(info.get("trajectory_error", 0.0))
+                episode_collision_count += int(bool(info.get("in_collision", False)))
 
                 if step >= args.update_after and replay.size >= args.batch_size and step % args.update_every == 0:
                     for _ in range(args.updates_per_step):
@@ -248,6 +259,7 @@ def main() -> None:
                         "smoothness": info.get("smoothness", 0.0),
                         "jerk_norm": info.get("jerk_norm", 0.0),
                         "in_collision": int(bool(info.get("in_collision", False))),
+                        "collision_components": ",".join(info.get("collision_components", [])),
                         "collision_magnitude": info.get("collision_magnitude", 0.0),
                         "collision_count": info.get("collision_count", 0),
                         "collision_penalty": info.get("collision_penalty", 0.0),
@@ -264,6 +276,7 @@ def main() -> None:
                         f"step={step} ep={episode_idx} "
                         f"reward={reward:.3f} err={row['tracking_error']:.4f} "
                         f"smooth={row['smoothness']:.4f} collision={row['in_collision']} "
+                        f"components={row['collision_components']} "
                         f"return={episode_return:.2f}"
                     )
 
@@ -277,14 +290,20 @@ def main() -> None:
                     if writer is not None:
                         writer.add_scalar("episode/return", episode_return, episode_idx)
                         writer.add_scalar("episode/length", episode_length, episode_idx)
+                        writer.add_scalar("episode/collisions", episode_collision_count, episode_idx)
                     if episode_length > 0:
                         mean_trajectory_error = episode_trajectory_error_sum / episode_length
                         recent_episode_trajectory_errors.append(mean_trajectory_error)
                         recent_episode_trajectory_errors = recent_episode_trajectory_errors[-args.curriculum_switch_window :]
+                        recent_episode_collision_counts.append(episode_collision_count)
+                        recent_episode_collision_counts = recent_episode_collision_counts[
+                            -args.curriculum_switch_window :
+                        ]
                         can_switch = (
                             reward_mode == "trajectory"
                             and episode_idx + 1 >= args.curriculum_switch_min_episodes
                             and len(recent_episode_trajectory_errors) == args.curriculum_switch_window
+                            and sum(recent_episode_collision_counts) == 0
                             and float(np.mean(recent_episode_trajectory_errors)) < args.curriculum_switch_trajectory_error
                         )
                         if can_switch:
@@ -300,6 +319,7 @@ def main() -> None:
                     episode_return = 0.0
                     episode_length = 0
                     episode_trajectory_error_sum = 0.0
+                    episode_collision_count = 0
 
         agent.save(
             str(save_dir / "final_model.pt"),

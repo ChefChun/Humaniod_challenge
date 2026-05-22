@@ -21,7 +21,7 @@ from ..core.trajectories import TrajectoryConfig, closest_target_on_trajectory, 
 
 # Training-time data flow:
 # 1. Isaac Sim publishes /isaac_joint_states as sensor_msgs/JointState.
-# 2. Isaac contact sensors publish /collision; _collision_cb stores whether this step is unsafe.
+# 2. Isaac contact sensors publish /collision/*; _collision_cb stores which components are unsafe.
 # 3. _joint_state_cb stores those joint positions/velocities in self.q and self.qd.
 # 4. make_observation packs robot state, target state, tracking error, and previous acceleration.
 # 5. SAC reads that observation and outputs a normalized 7D action.
@@ -77,6 +77,7 @@ class IsaacEnvConfig:
     controller_topic: str = "/isaac_joint_commands"
     joint_states_topic: str = "/isaac_joint_states"
     collision_topic: str = "/collision"
+    collision_topics: tuple[str, ...] = ()
     collision_msg_type: str = "std_msgs/msg/Bool"
     collision_threshold: float = 0.0
     collision_penalty: float = 20.0
@@ -113,6 +114,14 @@ def _load_ros_message_type(type_name: str):
 
             return WrenchStamped
         raise
+
+
+def _collision_component_name(topic: str) -> str:
+    normalized = topic.rstrip("/")
+    prefix = "/collision/"
+    if normalized.startswith(prefix):
+        return normalized[len(prefix) :].replace("/", ".")
+    return normalized.rsplit("/", 1)[-1] or normalized
 
 
 class IsaacFrankaTrackingEnv(gym.Env):
@@ -159,27 +168,50 @@ class IsaacFrankaTrackingEnv(gym.Env):
             self._joint_state_cb,
             qos,
         )
+        collision_topics = self._resolve_collision_topics(config.collision_topics)
+        self.collision_topics = collision_topics
+        self.collision_components = tuple(_collision_component_name(topic) for topic in collision_topics)
+        self.collision_states = {component: False for component in self.collision_components}
+        self.collision_magnitudes = {component: 0.0 for component in self.collision_components}
+        self.collision_event_counts = {component: 0 for component in self.collision_components}
+        self.in_collision = False
+        self.collision_magnitude = 0.0
+        self.collision_count = 0
         collision_msg_cls = _load_ros_message_type(config.collision_msg_type)
-        self._collision_sub = self._node.create_subscription(
-            collision_msg_cls,
-            config.collision_topic,
-            self._collision_cb,
-            qos,
-        )
+        self._collision_subs = []
+        for topic, component in zip(collision_topics, self.collision_components):
+            self._collision_subs.append(
+                self._node.create_subscription(
+                    collision_msg_cls,
+                    topic,
+                    lambda msg, component=component: self._collision_cb(msg, component),
+                    qos,
+                )
+            )
+        self._node.get_logger().info(f"Collision monitor subscribed to: {', '.join(collision_topics)}")
 
         self.q: np.ndarray | None = None
         self.qd = np.zeros(7, dtype=float)
         self.command_velocity = np.zeros(7, dtype=float)
         self.prev_acceleration = np.zeros(7, dtype=float)
-        self.in_collision = False
-        self.collision_magnitude = 0.0
-        self.collision_count = 0
         self.reward_mode = "trajectory"
         self.tracking_start_time: float | None = None
         self.step_count = 0
         self.t = 0.0
         self.trajectory_cfg = TrajectoryConfig(kind=config.trajectory)
         self._wait_for_joint_state()
+
+    def _resolve_collision_topics(self, configured_topics: tuple[str, ...]) -> tuple[str, ...]:
+        if configured_topics:
+            return tuple(configured_topics)
+
+        root_topic = self.config.collision_topic.rstrip("/")
+        visible_component_topics = sorted(
+            name
+            for name, _ in self._node.get_topic_names_and_types()
+            if name.startswith(f"{root_topic}/")
+        )
+        return tuple(visible_component_topics) if visible_component_topics else (self.config.collision_topic,)
 
     def _joint_state_cb(self, msg) -> None:
         # ROS2 JointState arrays are name-indexed; rebuild q/qd in the fixed Panda joint order.
@@ -190,15 +222,24 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.q = np.array([positions[name] for name in PANDA_JOINT_NAMES], dtype=float)
         self.qd = np.array([velocities.get(name, 0.0) for name in PANDA_JOINT_NAMES], dtype=float)
 
-    def _collision_cb(self, msg) -> None:
-        # /collision is the safety signal from Isaac contact sensors. A bool topic is
-        # expected, but numeric/contact-force messages are handled so the reward logic
-        # does not need to change if the publisher becomes more detailed later.
+    def _collision_cb(self, msg, component: str) -> None:
+        # Each collision topic owns one component state, e.g. /collision/hand -> hand.
+        # Bool topics are expected, but numeric/contact-force messages are also accepted.
         in_collision, magnitude = self._parse_collision_message(msg)
-        self.in_collision = in_collision
-        self.collision_magnitude = magnitude
+        was_in_collision = self.collision_states.get(component, False)
+        self.collision_states[component] = in_collision
+        self.collision_magnitudes[component] = magnitude
         if in_collision:
+            self.collision_event_counts[component] = self.collision_event_counts.get(component, 0) + 1
             self.collision_count += 1
+        self.in_collision = any(self.collision_states.values())
+        self.collision_magnitude = max(self.collision_magnitudes.values(), default=0.0)
+        if in_collision and not was_in_collision and self._node is not None:
+            active = ", ".join(self._active_collision_components())
+            self._node.get_logger().warn(f"Collision detected on {component}; active components: {active}")
+
+    def _active_collision_components(self) -> list[str]:
+        return sorted(component for component, active in self.collision_states.items() if active)
 
     def _parse_collision_message(self, msg) -> tuple[bool, float]:
         if hasattr(msg, "data"):
@@ -324,8 +365,11 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.t = 0.0
         self.command_velocity = np.zeros(7, dtype=float)
         self.prev_acceleration = np.zeros(7, dtype=float)
-        self.in_collision = False
-        self.collision_magnitude = 0.0
+        self.collision_states = {component: False for component in self.collision_components}
+        self.collision_magnitudes = {component: 0.0 for component in self.collision_components}
+        self.collision_event_counts = {component: 0 for component in self.collision_components}
+        self.in_collision = any(self.collision_states.values())
+        self.collision_magnitude = max(self.collision_magnitudes.values(), default=0.0)
         self.collision_count = 0
         self.tracking_start_time = 0.0 if self.reward_mode == "timed" else None
         self.trajectory_cfg = TrajectoryConfig(kind=self.config.trajectory)
@@ -339,6 +383,9 @@ class IsaacFrankaTrackingEnv(gym.Env):
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
         assert self.q is not None
+        collision_count_before = self.collision_count
+        collision_event_counts_before = dict(self.collision_event_counts)
+        collision_components_before = set(self._active_collision_components())
         action = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
         if self.config.action_noise > 0.0:
             action = np.clip(action + self.rng.normal(0.0, self.config.action_noise, size=7), -1.0, 1.0)
@@ -424,7 +471,17 @@ class IsaacFrankaTrackingEnv(gym.Env):
         smoothness = float(np.linalg.norm(acceleration_delta))
         jerk_norm = smoothness / self.config.dt
         limit_penalty = joint_limit_cost(self.q)
-        collision_penalty = self.config.collision_penalty if self.in_collision else 0.0
+        collision_events_this_step = self.collision_count - collision_count_before
+        collision_event_components = {
+            component
+            for component, count in self.collision_event_counts.items()
+            if count > collision_event_counts_before.get(component, 0)
+        }
+        collision_components_this_step = sorted(
+            collision_components_before | set(self._active_collision_components()) | collision_event_components
+        )
+        step_collision = bool(collision_components_this_step)
+        collision_penalty = self.config.collision_penalty if step_collision else 0.0
 
         # Two-phase reward:
         # trajectory mode: stay near the geometric path and move along its tangent;
@@ -440,7 +497,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
         )
 
         self.prev_acceleration = acceleration.copy()
-        terminated = self.config.terminate_on_collision and self.in_collision
+        terminated = self.config.terminate_on_collision and step_collision
         truncated = self.step_count >= self.config.horizon
         info = {
             "time": self.t,
@@ -463,8 +520,11 @@ class IsaacFrankaTrackingEnv(gym.Env):
             "acceleration": acceleration,
             "command_velocity": command_velocity,
             "command": command_velocity,
-            "in_collision": self.in_collision,
+            "in_collision": step_collision,
+            "collision_active": self.in_collision,
+            "collision_components": collision_components_this_step,
             "collision_magnitude": self.collision_magnitude,
+            "collision_events_this_step": collision_events_this_step,
             "collision_count": self.collision_count,
             "collision_penalty": collision_penalty,
             "is_success": error < 0.035,
