@@ -71,8 +71,8 @@ def target_at(t: float, cfg: TrajectoryConfig) -> tuple[np.ndarray, np.ndarray, 
         # Horizontal figure-eight in the Panda base x-y plane at constant center z.
         # This is the previous horizontal8 rotated 90 degrees around the z axis,
         # centered on the nominal Panda home end-effector position.
-        x_amp = 3.0 * radius
-        y_amp = 2.3 * radius
+        x_amp = 2.2 * radius
+        y_amp = 1.6 * radius
         pos = center + np.array([-y_amp * np.sin(2.0 * phase), x_amp * np.sin(phase), 0.0])
         vel = np.array(
             [

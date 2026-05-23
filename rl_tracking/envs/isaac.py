@@ -7,12 +7,14 @@ from gymnasium import spaces
 
 from ..core.control import integrate_joint_acceleration, policy_acceleration_command
 from ..core.kinematics import (
+    PANDA_HOME_EE_DIRECTION,
     PANDA_JOINT_NAMES,
     PANDA_Q_HOME,
     PANDA_Q_MAX,
     PANDA_Q_MIN,
     damped_velocity_ik,
     forward_kinematics,
+    hand_z_axis,
     joint_limit_cost,
     numerical_jacobian,
 )
@@ -85,6 +87,10 @@ class IsaacEnvConfig:
     max_joint_speed: float = 0.8
     max_joint_accel: float = 2.5
     max_joint_jerk: float = 18.0
+    orientation_reward_weight: float = 0.15
+    orientation_target_direction: tuple[float, float, float] = PANDA_HOME_EE_DIRECTION
+    min_ee_speed_fraction: float = 0.2
+    slow_speed_penalty_weight: float = 2.0
     trajectory_projection_samples: int = 180
     trajectory_projection_window: float = 1.2
     controller_topic: str = "/isaac_joint_commands"
@@ -135,6 +141,29 @@ def _collision_component_name(topic: str) -> str:
     if normalized.startswith(prefix):
         return normalized[len(prefix) :].replace("/", ".")
     return normalized.rsplit("/", 1)[-1] or normalized
+
+
+def _normalize_direction(direction: tuple[float, float, float] | list[float] | np.ndarray) -> np.ndarray:
+    direction_arr = np.asarray(direction, dtype=float)
+    if direction_arr.shape != (3,):
+        raise ValueError(f"Expected 3D orientation target direction, got shape {direction_arr.shape}")
+    norm = float(np.linalg.norm(direction_arr))
+    if norm < 1e-9:
+        raise ValueError("Orientation target direction must have non-zero length")
+    return direction_arr / norm
+
+
+def _speed_floor_penalty(
+    ee_velocity: np.ndarray,
+    expected_velocity: np.ndarray,
+    min_speed_fraction: float,
+    penalty_weight: float,
+) -> tuple[float, float, float, float]:
+    ee_speed = float(np.linalg.norm(ee_velocity))
+    expected_speed = float(np.linalg.norm(expected_velocity))
+    min_expected_speed = min_speed_fraction * expected_speed
+    speed_deficit = max(0.0, min_expected_speed - ee_speed)
+    return penalty_weight * speed_deficit, ee_speed, expected_speed, min_expected_speed
 
 
 class IsaacFrankaTrackingEnv(gym.Env):
@@ -212,6 +241,13 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.step_count = 0
         self.t = 0.0
         self.trajectory_cfg = self._make_trajectory_config()
+        if config.orientation_reward_weight < 0.0:
+            raise ValueError("orientation_reward_weight must be non-negative")
+        if config.min_ee_speed_fraction < 0.0:
+            raise ValueError("min_ee_speed_fraction must be non-negative")
+        if config.slow_speed_penalty_weight < 0.0:
+            raise ValueError("slow_speed_penalty_weight must be non-negative")
+        self.orientation_target_direction = _normalize_direction(config.orientation_target_direction)
         self._wait_for_joint_state()
 
     def _make_trajectory_config(self) -> TrajectoryConfig:
@@ -525,7 +561,11 @@ class IsaacFrankaTrackingEnv(gym.Env):
             else:
                 velocity_toward_path = 0.0
             tangent_norm = float(np.linalg.norm(closest_target_vel))
-            velocity_along_trajectory = float(np.dot(ee_velocity, closest_target_vel / tangent_norm)) if tangent_norm > 1e-6 else 0.0
+            velocity_along_trajectory = (
+                float(np.dot(ee_velocity, closest_target_vel / tangent_norm))
+                if tangent_norm > 1e-6
+                else 0.0
+            )
             velocity_reward = (
                 0.8 * float(np.clip(velocity_toward_path, -0.3, 0.3))
                 + 1.4 * float(np.clip(velocity_along_trajectory, -0.3, 0.3))
@@ -541,9 +581,20 @@ class IsaacFrankaTrackingEnv(gym.Env):
             velocity_reward = -1.2 * velocity_error + 0.25 * float(np.exp(-8.0 * velocity_error))
             position_reward = -7.0 * error + 0.45 * float(np.exp(-35.0 * error))
 
+        slow_speed_penalty, ee_speed, expected_speed, min_expected_speed = _speed_floor_penalty(
+            ee_velocity,
+            reward_target_vel,
+            self.config.min_ee_speed_fraction,
+            self.config.slow_speed_penalty_weight,
+        )
         smoothness = float(np.linalg.norm(acceleration_delta))
         jerk_norm = smoothness / self.config.dt
         limit_penalty = joint_limit_cost(self.q)
+        ee_direction = hand_z_axis(self.q)
+        orientation_alignment = float(
+            np.clip(np.dot(ee_direction, self.orientation_target_direction), -1.0, 1.0)
+        )
+        orientation_reward = self.config.orientation_reward_weight * orientation_alignment
         collision_events_this_step = self.collision_count - collision_count_before
         collision_event_components = {
             component
@@ -566,6 +617,8 @@ class IsaacFrankaTrackingEnv(gym.Env):
             - 0.015 * float(np.dot(acceleration, acceleration))
             - 0.05 * smoothness
             - 6.0 * limit_penalty
+            + orientation_reward
+            - slow_speed_penalty
             - collision_penalty
         )
 
@@ -586,6 +639,14 @@ class IsaacFrankaTrackingEnv(gym.Env):
             "velocity_along_trajectory": velocity_along_trajectory,
             "velocity_reward": velocity_reward,
             "position_reward": position_reward,
+            "ee_speed": ee_speed,
+            "expected_speed": expected_speed,
+            "min_expected_speed": min_expected_speed,
+            "slow_speed_penalty": slow_speed_penalty,
+            "orientation_alignment": orientation_alignment,
+            "orientation_reward": orientation_reward,
+            "ee_direction": ee_direction,
+            "orientation_target_direction": self.orientation_target_direction,
             "ee_velocity": ee_velocity,
             "smoothness": smoothness,
             "jerk_norm": jerk_norm,

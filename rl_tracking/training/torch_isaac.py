@@ -55,6 +55,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-joint-speed", type=float, default=0.8)
     parser.add_argument("--max-joint-accel", type=float, default=2.5)
     parser.add_argument("--max-joint-jerk", type=float, default=18.0)
+    parser.add_argument(
+        "--orientation-reward-weight",
+        type=float,
+        default=IsaacEnvConfig.orientation_reward_weight,
+    )
+    parser.add_argument(
+        "--orientation-target-direction",
+        nargs=3,
+        type=float,
+        default=IsaacEnvConfig.orientation_target_direction,
+        metavar=("X", "Y", "Z"),
+    )
+    parser.add_argument(
+        "--min-ee-speed-fraction",
+        type=float,
+        default=IsaacEnvConfig.min_ee_speed_fraction,
+    )
+    parser.add_argument(
+        "--slow-speed-penalty-weight",
+        type=float,
+        default=IsaacEnvConfig.slow_speed_penalty_weight,
+    )
     parser.add_argument("--action-accel-scale", type=float, default=1.0)
     parser.add_argument("--residual-scale", type=float)
     parser.add_argument("--curriculum-switch-min-episodes", type=int, default=5)
@@ -111,6 +133,10 @@ def main() -> None:
         max_joint_speed=args.max_joint_speed,
         max_joint_accel=args.max_joint_accel,
         max_joint_jerk=args.max_joint_jerk,
+        orientation_reward_weight=args.orientation_reward_weight,
+        orientation_target_direction=tuple(args.orientation_target_direction),
+        min_ee_speed_fraction=args.min_ee_speed_fraction,
+        slow_speed_penalty_weight=args.slow_speed_penalty_weight,
         trajectory_projection_samples=args.trajectory_projection_samples,
         trajectory_projection_window=args.trajectory_projection_window,
         controller_topic=args.controller_topic,
@@ -171,6 +197,12 @@ def main() -> None:
                 "velocity_toward_path",
                 "velocity_reward",
                 "position_reward",
+                "ee_speed",
+                "expected_speed",
+                "min_expected_speed",
+                "slow_speed_penalty",
+                "orientation_alignment",
+                "orientation_reward",
                 "smoothness",
                 "jerk_norm",
                 "in_collision",
@@ -211,6 +243,16 @@ def main() -> None:
                 f"{args.curriculum_switch_window} recent episode(s) average trajectory error "
                 f"< {args.curriculum_switch_trajectory_error}"
             )
+            print(
+                "orientation reward: "
+                f"weight={env_config.orientation_reward_weight} "
+                f"target_direction={env_config.orientation_target_direction}"
+            )
+            print(
+                "speed floor penalty: "
+                f"min_fraction={env_config.min_ee_speed_fraction} "
+                f"weight={env_config.slow_speed_penalty_weight}"
+            )
 
             last_losses: dict[str, float] = {}
             reward_mode = "trajectory"
@@ -243,8 +285,17 @@ def main() -> None:
                     writer.add_scalar("tracking/timed_error_m", info.get("timed_error", 0.0), step)
                     writer.add_scalar("tracking/trajectory_error_m", info.get("trajectory_error", 0.0), step)
                     writer.add_scalar("tracking/velocity_toward_path", info.get("velocity_toward_path", 0.0), step)
+                    writer.add_scalar("tracking/ee_speed", info.get("ee_speed", 0.0), step)
+                    writer.add_scalar("tracking/min_expected_speed", info.get("min_expected_speed", 0.0), step)
                     writer.add_scalar("reward/velocity", info.get("velocity_reward", 0.0), step)
                     writer.add_scalar("reward/position", info.get("position_reward", 0.0), step)
+                    writer.add_scalar("penalty/slow_speed", info.get("slow_speed_penalty", 0.0), step)
+                    writer.add_scalar("reward/orientation", info.get("orientation_reward", 0.0), step)
+                    writer.add_scalar(
+                        "tracking/orientation_alignment",
+                        info.get("orientation_alignment", 0.0),
+                        step,
+                    )
                     writer.add_scalar("tracking/smoothness", info.get("smoothness", 0.0), step)
                     writer.add_scalar("tracking/jerk_norm", info.get("jerk_norm", 0.0), step)
                     writer.add_scalar("safety/in_collision", float(info.get("in_collision", False)), step)
@@ -278,6 +329,12 @@ def main() -> None:
                         "velocity_toward_path": info.get("velocity_toward_path", 0.0),
                         "velocity_reward": info.get("velocity_reward", 0.0),
                         "position_reward": info.get("position_reward", 0.0),
+                        "ee_speed": info.get("ee_speed", 0.0),
+                        "expected_speed": info.get("expected_speed", 0.0),
+                        "min_expected_speed": info.get("min_expected_speed", 0.0),
+                        "slow_speed_penalty": info.get("slow_speed_penalty", 0.0),
+                        "orientation_alignment": info.get("orientation_alignment", 0.0),
+                        "orientation_reward": info.get("orientation_reward", 0.0),
                         "smoothness": info.get("smoothness", 0.0),
                         "jerk_norm": info.get("jerk_norm", 0.0),
                         "in_collision": int(bool(info.get("in_collision", False))),

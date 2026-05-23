@@ -104,9 +104,23 @@ def hand_position(q: np.ndarray) -> np.ndarray:
     return _panda_hand_transform(q)[:3, 3]
 
 
+def hand_z_axis(q: np.ndarray) -> np.ndarray:
+    """Hand-frame +Z axis expressed in the Panda base frame."""
+    direction = _panda_hand_transform(q)[:3, 2]
+    norm = float(np.linalg.norm(direction))
+    if norm < 1e-9:
+        raise ValueError("End-effector direction has near-zero length")
+    return direction / norm
+
+
 def forward_kinematics(q: np.ndarray) -> np.ndarray:
     """Approximate Franka Panda end-effector position from 7 joint angles."""
     return hand_position(q)
+
+
+PANDA_HOME_EE_DIRECTION = tuple(
+    0.0 if abs(float(v)) < 1e-9 else float(v) for v in np.round(hand_z_axis(PANDA_Q_HOME), 12)
+)
 
 
 def numerical_jacobian(q: np.ndarray, eps: float = 1e-4) -> np.ndarray:

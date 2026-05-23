@@ -8,7 +8,7 @@ This folder contains a focused SAC baseline for training a Franka arm in Isaac S
 - Smooth control: learned joint-acceleration policy with velocity, acceleration, and jerk limits
 - Safety: optional collision penalty from Isaac contact sensors on `/collision/*`
 - Uncertainty: observation and action noise
-- Metrics: tracking error, command smoothness, and success flag logged to TensorBoard
+- Metrics: tracking error, end-effector speed, orientation alignment, command smoothness, and success flag logged to TensorBoard
 
 The expected Isaac topics are:
 
@@ -128,6 +128,27 @@ python -m rl_tracking.training.torch_isaac \
   --residual-scale 0.35
 ```
 
+The reward includes a small end-effector direction term. By default it encourages
+the Panda hand-frame `+Z` axis to stay aligned with the home pose direction,
+which is approximately base-frame `-Z`, while the position and velocity tracking
+terms remain dominant:
+
+```bash
+python -m rl_tracking.training.torch_isaac \
+  --orientation-reward-weight 0.15 \
+  --orientation-target-direction 0 0 -1
+```
+
+The reward also includes a one-sided slow-motion penalty. The end effector is
+penalized only when its speed falls below one fifth of the current target
+trajectory speed; moving faster than that floor does not add reward:
+
+```bash
+python -m rl_tracking.training.torch_isaac \
+  --min-ee-speed-fraction 0.2 \
+  --slow-speed-penalty-weight 2.0
+```
+
 ## Run A Trained Policy
 
 After training:
@@ -147,7 +168,8 @@ python -m rl_tracking.nodes.kinematic_runner --trajectory horizontal8
 For the MoveIt Panda model, the default trajectory center is in `panda_link0`
 coordinates near the nominal `panda_hand` pose. The horizontal figure-eight keeps
 `z` constant at the configured center height and starts at that center. Its long
-axis runs side-to-side in the horizontal plane.
+axis runs side-to-side in the horizontal plane. The current horizontal8 size is
+smaller than the previous large version while keeping the same center.
 The kinematic runner first moves to the nearest point on the path, then starts
 advancing along the trajectory.
 
