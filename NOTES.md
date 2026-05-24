@@ -10,7 +10,11 @@ The observation contains:
 - desired target position and target velocity
 - Cartesian tracking error
 - trajectory phase as `sin(phase), cos(phase)`
-- previous command, so the policy can reduce jitter
+- _previous command, so the policy can reduce jitter_
+
+Explanation on `sin(phase), cos(phase)`:
+It tells the RL model which section of the trajectory the desired position is at.
+
 
 Gaussian observation noise is enabled during training.
 
