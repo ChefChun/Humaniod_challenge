@@ -56,13 +56,16 @@ Reinforcement learning is fully responsible for choosing the robot velocity comm
 
 ## Reward
 
-Each step rewards accurate and smooth tracking:
+Each step rewards accurate, smooth, and safe tracking:
 
-- negative Cartesian position error
-- penalty on large joint velocities
+- Cartesian position tracking reward with an exponential bonus near the target
+- velocity tracking reward: path-tangent progress in trajectory mode, target-velocity matching in timed mode
+- orientation alignment reward for keeping the hand `+Z` axis near the configured target direction. This reward is quite crucial as it preempt the end effector to a single direction, which can reduce complexity
+- penalty on large commanded joint velocities
 - penalty on command changes between steps
 - penalty near joint limits
-- small exponential bonus for low tracking error
+- one-sided slow end-effector speed penalty when the hand moves below the target-speed floor
+- collision penalty when contact sensors report a collision
 
 Reward weights and penalty constants are constants in
 `rl_tracking/envs/isaac.py`
