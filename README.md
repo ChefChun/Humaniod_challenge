@@ -27,6 +27,10 @@ prim_name:\
 
 See [NOTES.md](NOTES.md) for the short design note covering state, action, reward, trajectory representation, uncertainty, and evaluation metrics.
 
+To be honest the current training requires many improvements. But I am undergoing final exams so I'd better leave time for me to do some revision.
+
+If the reinforcement model aims to provide acceleration instead of velocity, the motion of the end effector is much smoother but that require more time and better reward setting.
+Also the target position can be set better instead of a point moving periodically. We can set the target position the most desired next position. I was trying to do that in ```acc``` but the training is too long. Also in ```rl_vel``` I was improving the target position.
 ## Build Environment
 ### System:
 Windows 11
