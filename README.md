@@ -20,6 +20,10 @@ The expected Isaac topics are:
 prim_name:\
 ```panda_hand```,```panda_rightfinger``` etc.
 
+## Challenge Note
+
+See [NOTES.md](NOTES.md) for the short design note covering state, action, reward, trajectory representation, uncertainty, and evaluation metrics.
+
 ## Build Environment
 ### System:
 Windows 11
@@ -48,8 +52,7 @@ visualization_msgs
 tf2_ros
 ```
 
-These come from ROS2/apt packages, not `pip`. If you did not install a ROS2
-desktop distribution, install the required packages with:
+Install a ROS2 humble and install the required packages with:
 
 ```bash
 sudo apt install \
@@ -86,9 +89,6 @@ torch
 tensorboard
 ```
 
-If you need a CUDA-specific PyTorch build, install PyTorch using the command
-recommended for your CUDA version, then run `pip install -r requirements.txt`.
-
 ## Train
 
 Launch Isaac Sim first, confirm the topics exist with `ros2 topic list`, then run:
@@ -99,8 +99,8 @@ python -m rl_tracking.training.torch_isaac --total-timesteps 100000
 
 By default, training auto-subscribes to visible `/collision/...` component topics as
 `std_msgs/msg/Bool`, falling back to `/collision` if no component topics are visible yet.
-You can also repeat `--collision-topic` to set the list explicitly. A collision subtracts
-the fixed collision penalty from the reward, logs the component name, and terminates the current episode:
+This is because previously all collision from different prims were combined and published.
+You can change the collision topic and message type using:
 
 ```bash
 python -m rl_tracking.training.torch_isaac \
@@ -117,7 +117,7 @@ The implementation is organized by responsibility:
 ```text
 rl_tracking/core/        kinematics and target trajectories
 rl_tracking/envs/        Isaac Gymnasium environment
-rl_tracking/algorithms/  custom PyTorch SAC
+rl_tracking/algorithms/  SAC implementation under PyTorch
 rl_tracking/training/    training entry points
 rl_tracking/nodes/       ROS2 policy runner
 ```
@@ -127,9 +127,7 @@ This saves the custom PyTorch SAC model to:
 ```text
 runs/torch_isaac/final_model.pt
 ```
-
-The PyTorch trainer owns the actor, twin critics, target critics, replay buffer, entropy temperature, and update loop.
-The SAC actor outputs normalized joint-velocity commands. The controller scales the action by the configured joint-speed limit, clips the final velocity, integrates it to a desired joint position, then publishes a `sensor_msgs/msg/JointState` command.
+by default
 
 ## Visualize Training
 
@@ -149,14 +147,6 @@ Then open:
 
 ```text
 http://127.0.0.1:6006
-```
-
-If your controller topic is different:
-
-```bash
-python -m rl_tracking.training.torch_isaac \
-  --controller-topic /isaac_joint_commands \
-  --joint-states-topic /isaac_joint_states
 ```
 
 Velocity-control limits can be tuned with:
@@ -180,14 +170,6 @@ After training:
 python -m rl_tracking.nodes.policy_runner --model runs/torch_isaac/final_model.pt
 ```
 
-## Run A Direct IK Trajectory Test
-
-To test the trajectory and command topics without RL, run the kinematic runner:
-
-```bash
-python -m rl_tracking.nodes.kinematic_runner
-```
-
 For the MoveIt Panda model, the fixed trajectory center is in `panda_link0`
 coordinates near the nominal `panda_hand` pose. The horizontal figure-eight keeps
 `z` constant at that center height and starts at that center. Its long axis runs
@@ -203,23 +185,10 @@ Publish the configured target path and the moving target point as ROS2 visualiza
 python -m rl_tracking.nodes.trajectory_visualizer --frame-id panda_link0
 ```
 
-The green end-effector marker uses TF from `panda_link0` to `panda_hand` by
-default and falls back to the local FK estimate if TF is unavailable. If your
-Isaac scene does not publish TF, add a ROS2 Publish Transform Tree node for
-`/Franka` or run the visualizer with `--ee-source fk`.
-The orange moving target marker has its own clock; the kinematic runner may not
-be phase-synchronized with it because it starts from the nearest path point.
-Use the blue path for geometric tracking checks, or run the runner with
-`--start-mode fixed --approach-duration 0` when you need phase-zero comparison.
-
 The marker topic is:
 
 ```text
 /rl_tracking/trajectory_markers
 ```
 
-RViz can display this directly with a `MarkerArray` display. To show it inside the Isaac Sim viewport, your Isaac scene needs a ROS2 marker subscriber or equivalent script that converts these markers into visible USD/debug-draw geometry.
-
-## Challenge Note
-
-See [NOTES.md](NOTES.md) for the short design note covering state, action, reward, trajectory representation, uncertainty, and evaluation metrics.
+RViz can display this directly with a `MarkerArray` display.
