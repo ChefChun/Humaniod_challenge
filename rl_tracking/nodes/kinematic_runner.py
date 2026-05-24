@@ -10,10 +10,6 @@ from ..core.kinematics import (
     forward_kinematics,
 )
 from ..core.trajectories import (
-    DEFAULT_TRAJECTORY_CENTER,
-    DEFAULT_TRAJECTORY_PERIOD,
-    DEFAULT_TRAJECTORY_RADIUS,
-    TRAJECTORY_KINDS,
     closest_target_on_trajectory,
     make_trajectory_config,
     target_at,
@@ -27,17 +23,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--controller-topic", default="/isaac_joint_commands")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
     parser.add_argument("--dt", type=float, default=0.02)
-    parser.add_argument("--trajectory", choices=TRAJECTORY_KINDS, default="figure8")
-    parser.add_argument(
-        "--trajectory-center",
-        nargs=3,
-        type=float,
-        default=DEFAULT_TRAJECTORY_CENTER,
-        metavar=("X", "Y", "Z"),
-    )
-    parser.add_argument("--trajectory-radius", type=float, default=DEFAULT_TRAJECTORY_RADIUS)
-    parser.add_argument("--trajectory-period", type=float, default=DEFAULT_TRAJECTORY_PERIOD)
-    parser.add_argument("--trajectory-unreachable", action="store_true")
     parser.add_argument("--max-joint-speed", type=float, default=0.8)
     parser.add_argument("--kp", type=float, default=3.5)
     parser.add_argument("--damping", type=float, default=0.08)
@@ -68,13 +53,7 @@ def main() -> None:
         raise SystemExit("ROS2 Python packages are not available. Source your ROS2 workspace first.") from exc
 
     args = parse_args()
-    trajectory_cfg = make_trajectory_config(
-        kind=args.trajectory,
-        center=tuple(args.trajectory_center),
-        radius=args.trajectory_radius,
-        period=args.trajectory_period,
-        unreachable=args.trajectory_unreachable,
-    )
+    trajectory_cfg = make_trajectory_config()
 
     class KinematicRunner(Node):
         def __init__(self) -> None:
@@ -91,7 +70,7 @@ def main() -> None:
             self.stop_requested = False
             self.timer = self.create_timer(args.dt, self.publish_command)
             self.get_logger().info(
-                f"Following {args.trajectory} trajectory on {args.controller_topic}; "
+                f"Following fixed horizontal8 trajectory on {args.controller_topic}; "
                 f"listening to {args.joint_states_topic}."
             )
 

@@ -3,14 +3,7 @@ import argparse
 import numpy as np
 
 from ..core.kinematics import PANDA_BASE_FRAME, PANDA_EE_FRAME, PANDA_JOINT_NAMES, forward_kinematics
-from ..core.trajectories import (
-    DEFAULT_TRAJECTORY_CENTER,
-    DEFAULT_TRAJECTORY_PERIOD,
-    DEFAULT_TRAJECTORY_RADIUS,
-    TRAJECTORY_KINDS,
-    make_trajectory_config,
-    target_at,
-)
+from ..core.trajectories import make_trajectory_config, target_at
 
 
 # Visualization data flow:
@@ -19,18 +12,13 @@ from ..core.trajectories import (
 # Otherwise it falls back to the same local FK used by training and the kinematic runner.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Publish the configured target trajectory as ROS2 visualization markers.")
-    parser.add_argument("--trajectory", choices=TRAJECTORY_KINDS, default="figure8")
     parser.add_argument("--frame-id", default=PANDA_BASE_FRAME)
     parser.add_argument("--ee-frame", default=PANDA_EE_FRAME)
     parser.add_argument("--ee-source", choices=["tf", "fk", "none"], default="tf")
     parser.add_argument("--topic", default="/rl_tracking/trajectory_markers")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
-    parser.add_argument("--center", nargs=3, type=float, default=DEFAULT_TRAJECTORY_CENTER, metavar=("X", "Y", "Z"))
-    parser.add_argument("--radius", type=float, default=DEFAULT_TRAJECTORY_RADIUS)
-    parser.add_argument("--period", type=float, default=DEFAULT_TRAJECTORY_PERIOD)
     parser.add_argument("--samples", type=int, default=160)
     parser.add_argument("--rate-hz", type=float, default=20.0)
-    parser.add_argument("--unreachable", action="store_true")
     return parser.parse_args()
 
 
@@ -52,13 +40,7 @@ def main() -> None:
     except ImportError as exc:
         raise SystemExit("ROS2 visualization packages are not available. Source your ROS2 workspace first.") from exc
 
-    cfg = make_trajectory_config(
-        kind=args.trajectory,
-        center=tuple(args.center),
-        radius=args.radius,
-        period=args.period,
-        unreachable=args.unreachable,
-    )
+    cfg = make_trajectory_config()
 
     class TrajectoryVisualizer(Node):
         def __init__(self) -> None:
@@ -87,7 +69,7 @@ def main() -> None:
             self.timer = self.create_timer(1.0 / args.rate_hz, self.publish_markers)
             self.status_timer = self.create_timer(2.0, self.log_status)
             self.get_logger().info(
-                f"Publishing {args.trajectory} trajectory markers on {args.topic} "
+                f"Publishing fixed horizontal8 trajectory markers on {args.topic} "
                 f"in frame '{args.frame_id}' with {len(self.path_points)} path points."
             )
             self.get_logger().info(

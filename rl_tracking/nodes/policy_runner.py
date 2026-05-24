@@ -8,14 +8,7 @@ import torch
 from ..algorithms.sac import TorchSACAgent
 from ..core.control import integrate_joint_velocity, policy_velocity_command
 from ..core.kinematics import PANDA_JOINT_NAMES, forward_kinematics
-from ..core.trajectories import (
-    DEFAULT_TRAJECTORY_CENTER,
-    DEFAULT_TRAJECTORY_PERIOD,
-    DEFAULT_TRAJECTORY_RADIUS,
-    TRAJECTORY_KINDS,
-    make_trajectory_config,
-    target_at,
-)
+from ..core.trajectories import make_trajectory_config, target_at
 from ..envs.isaac import make_observation
 
 
@@ -33,7 +26,7 @@ def load_env_config(path: Path | None, model_path: Path) -> dict:
                 path = candidate
                 break
     if path is None:
-        return {"trajectory": "figure8"}
+        return {}
     return json.loads(path.read_text())
 
 
@@ -44,11 +37,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--controller-topic", default="/isaac_joint_commands")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
     parser.add_argument("--dt", type=float, default=0.08)
-    parser.add_argument("--trajectory", choices=TRAJECTORY_KINDS)
-    parser.add_argument("--trajectory-center", nargs=3, type=float, metavar=("X", "Y", "Z"))
-    parser.add_argument("--trajectory-radius", type=float)
-    parser.add_argument("--trajectory-period", type=float)
-    parser.add_argument("--trajectory-unreachable", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--max-joint-speed", type=float)
     parser.add_argument("--action-velocity-scale", type=float)
     return parser.parse_args()
@@ -76,29 +64,7 @@ def main() -> None:
     args = parse_args()
     policy = TorchPolicyAdapter(args.model)
     env_config = load_env_config(args.config, args.model)
-    trajectory_cfg = make_trajectory_config(
-        kind=args.trajectory or env_config.get("trajectory", "figure8"),
-        center=(
-            args.trajectory_center
-            if args.trajectory_center is not None
-            else env_config.get("trajectory_center", DEFAULT_TRAJECTORY_CENTER)
-        ),
-        radius=(
-            args.trajectory_radius
-            if args.trajectory_radius is not None
-            else env_config.get("trajectory_radius", DEFAULT_TRAJECTORY_RADIUS)
-        ),
-        period=(
-            args.trajectory_period
-            if args.trajectory_period is not None
-            else env_config.get("trajectory_period", DEFAULT_TRAJECTORY_PERIOD)
-        ),
-        unreachable=(
-            args.trajectory_unreachable
-            if args.trajectory_unreachable is not None
-            else env_config.get("trajectory_unreachable", False)
-        ),
-    )
+    trajectory_cfg = make_trajectory_config()
     max_joint_speed = args.max_joint_speed if args.max_joint_speed is not None else float(env_config.get("max_joint_speed", 0.8))
     action_velocity_scale = args.action_velocity_scale
     if action_velocity_scale is None:

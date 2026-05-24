@@ -19,14 +19,31 @@ from ..core.kinematics import (
     numerical_jacobian,
 )
 from ..core.trajectories import (
-    DEFAULT_TRAJECTORY_CENTER,
-    DEFAULT_TRAJECTORY_PERIOD,
-    DEFAULT_TRAJECTORY_RADIUS,
-    TrajectoryConfig,
     closest_target_on_trajectory_time,
     make_trajectory_config,
     target_at,
 )
+
+
+ORIENTATION_REWARD_WEIGHT = 0.15
+ORIENTATION_TARGET_DIRECTION = PANDA_HOME_EE_DIRECTION
+MIN_EE_SPEED_FRACTION = 0.2
+SLOW_SPEED_PENALTY_WEIGHT = 2.0
+COLLISION_PENALTY = 20.0
+COMMAND_VELOCITY_PENALTY_WEIGHT = 0.01
+COMMAND_SMOOTHNESS_PENALTY_WEIGHT = 0.05
+JOINT_LIMIT_PENALTY_WEIGHT = 6.0
+TRAJECTORY_VELOCITY_TOWARD_PATH_WEIGHT = 0.8
+TRAJECTORY_VELOCITY_ALONG_PATH_WEIGHT = 1.4
+TRAJECTORY_POSITION_ERROR_WEIGHT = 6.0
+TRAJECTORY_POSITION_BONUS_WEIGHT = 0.30
+TRAJECTORY_POSITION_BONUS_DECAY = 45.0
+TIMED_VELOCITY_ERROR_WEIGHT = 1.2
+TIMED_VELOCITY_BONUS_WEIGHT = 0.25
+TIMED_VELOCITY_BONUS_DECAY = 8.0
+TIMED_POSITION_ERROR_WEIGHT = 7.0
+TIMED_POSITION_BONUS_WEIGHT = 0.45
+TIMED_POSITION_BONUS_DECAY = 35.0
 
 
 # Training-time data flow:
@@ -77,19 +94,10 @@ def make_observation(
 class IsaacEnvConfig:
     dt: float = 0.08
     horizon: int = 180
-    trajectory: str = "figure8"
-    trajectory_center: tuple[float, float, float] = DEFAULT_TRAJECTORY_CENTER
-    trajectory_radius: float = DEFAULT_TRAJECTORY_RADIUS
-    trajectory_period: float = DEFAULT_TRAJECTORY_PERIOD
-    trajectory_unreachable: bool = False
     obs_noise: float = 0.001
     action_noise: float = 0.01
     action_velocity_scale: float = 1.0
     max_joint_speed: float = 0.8
-    orientation_reward_weight: float = 0.15
-    orientation_target_direction: tuple[float, float, float] = PANDA_HOME_EE_DIRECTION
-    min_ee_speed_fraction: float = 0.2
-    slow_speed_penalty_weight: float = 2.0
     trajectory_projection_samples: int = 180
     trajectory_projection_window: float = 1.2
     controller_topic: str = "/isaac_joint_commands"
@@ -98,7 +106,6 @@ class IsaacEnvConfig:
     collision_topics: tuple[str, ...] = ()
     collision_msg_type: str = "std_msgs/msg/Bool"
     collision_threshold: float = 0.0
-    collision_penalty: float = 20.0
     terminate_on_collision: bool = True
     reset_duration: float = 2.0
     command_duration: float = 0.12
@@ -238,30 +245,15 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.path_time_estimate: float | None = None
         self.step_count = 0
         self.t = 0.0
-        self.trajectory_cfg = self._make_trajectory_config()
+        self.trajectory_cfg = make_trajectory_config()
         if config.dt <= 0.0:
             raise ValueError("dt must be positive")
         if config.max_joint_speed <= 0.0:
             raise ValueError("max_joint_speed must be positive")
         if config.action_velocity_scale < 0.0:
             raise ValueError("action_velocity_scale must be non-negative")
-        if config.orientation_reward_weight < 0.0:
-            raise ValueError("orientation_reward_weight must be non-negative")
-        if config.min_ee_speed_fraction < 0.0:
-            raise ValueError("min_ee_speed_fraction must be non-negative")
-        if config.slow_speed_penalty_weight < 0.0:
-            raise ValueError("slow_speed_penalty_weight must be non-negative")
-        self.orientation_target_direction = _normalize_direction(config.orientation_target_direction)
+        self.orientation_target_direction = _normalize_direction(ORIENTATION_TARGET_DIRECTION)
         self._wait_for_joint_state()
-
-    def _make_trajectory_config(self) -> TrajectoryConfig:
-        return make_trajectory_config(
-            kind=self.config.trajectory,
-            center=self.config.trajectory_center,
-            radius=self.config.trajectory_radius,
-            period=self.config.trajectory_period,
-            unreachable=self.config.trajectory_unreachable,
-        )
 
     def _refresh_collision_subscriptions(self) -> None:
         if self._node is None:
@@ -486,7 +478,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
         self.collision_magnitude = max(self.collision_magnitudes.values(), default=0.0)
         self.collision_count = 0
         self.tracking_start_time = 0.0 if self.reward_mode == "timed" else None
-        self.trajectory_cfg = self._make_trajectory_config()
+        self.trajectory_cfg = make_trajectory_config()
         self.path_time_estimate = None
 
         random_offset = self.rng.normal(0.0, 0.025, size=7)
@@ -563,10 +555,13 @@ class IsaacFrankaTrackingEnv(gym.Env):
                 else 0.0
             )
             velocity_reward = (
-                0.8 * float(np.clip(velocity_toward_path, -0.3, 0.3))
-                + 1.4 * float(np.clip(velocity_along_trajectory, -0.3, 0.3))
+                TRAJECTORY_VELOCITY_TOWARD_PATH_WEIGHT * float(np.clip(velocity_toward_path, -0.3, 0.3))
+                + TRAJECTORY_VELOCITY_ALONG_PATH_WEIGHT * float(np.clip(velocity_along_trajectory, -0.3, 0.3))
             )
-            position_reward = -6.0 * error + 0.30 * float(np.exp(-45.0 * error))
+            position_reward = (
+                -TRAJECTORY_POSITION_ERROR_WEIGHT * error
+                + TRAJECTORY_POSITION_BONUS_WEIGHT * float(np.exp(-TRAJECTORY_POSITION_BONUS_DECAY * error))
+            )
         else:
             reward_target_pos = next_target_pos
             reward_target_vel = next_target_vel
@@ -574,14 +569,20 @@ class IsaacFrankaTrackingEnv(gym.Env):
             velocity_error = float(np.linalg.norm(ee_velocity - next_target_vel))
             velocity_toward_path = 0.0
             velocity_along_trajectory = 0.0
-            velocity_reward = -1.2 * velocity_error + 0.25 * float(np.exp(-8.0 * velocity_error))
-            position_reward = -7.0 * error + 0.45 * float(np.exp(-35.0 * error))
+            velocity_reward = (
+                -TIMED_VELOCITY_ERROR_WEIGHT * velocity_error
+                + TIMED_VELOCITY_BONUS_WEIGHT * float(np.exp(-TIMED_VELOCITY_BONUS_DECAY * velocity_error))
+            )
+            position_reward = (
+                -TIMED_POSITION_ERROR_WEIGHT * error
+                + TIMED_POSITION_BONUS_WEIGHT * float(np.exp(-TIMED_POSITION_BONUS_DECAY * error))
+            )
 
         slow_speed_penalty, ee_speed, expected_speed, min_expected_speed = _speed_floor_penalty(
             ee_velocity,
             reward_target_vel,
-            self.config.min_ee_speed_fraction,
-            self.config.slow_speed_penalty_weight,
+            MIN_EE_SPEED_FRACTION,
+            SLOW_SPEED_PENALTY_WEIGHT,
         )
         smoothness = float(np.linalg.norm(command_delta))
         limit_penalty = joint_limit_cost(self.q)
@@ -589,7 +590,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
         orientation_alignment = float(
             np.clip(np.dot(ee_direction, self.orientation_target_direction), -1.0, 1.0)
         )
-        orientation_reward = self.config.orientation_reward_weight * orientation_alignment
+        orientation_reward = ORIENTATION_REWARD_WEIGHT * orientation_alignment
         collision_events_this_step = self.collision_count - collision_count_before
         collision_event_components = {
             component
@@ -600,7 +601,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
             collision_components_before | set(self._active_collision_components()) | collision_event_components
         )
         step_collision = bool(collision_components_this_step)
-        collision_penalty = self.config.collision_penalty if step_collision else 0.0
+        collision_penalty = COLLISION_PENALTY if step_collision else 0.0
 
         # Two-phase reward:
         # trajectory mode: stay near the geometric path and move along its tangent;
@@ -608,9 +609,9 @@ class IsaacFrankaTrackingEnv(gym.Env):
         reward = (
             position_reward
             + velocity_reward
-            - 0.01 * float(np.dot(command_velocity, command_velocity))
-            - 0.05 * smoothness
-            - 6.0 * limit_penalty
+            - COMMAND_VELOCITY_PENALTY_WEIGHT * float(np.dot(command_velocity, command_velocity))
+            - COMMAND_SMOOTHNESS_PENALTY_WEIGHT * smoothness
+            - JOINT_LIMIT_PENALTY_WEIGHT * limit_penalty
             + orientation_reward
             - slow_speed_penalty
             - collision_penalty

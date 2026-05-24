@@ -1,9 +1,9 @@
 # Franka Isaac Sim End-Effector Tracking
 
-This folder contains a focused SAC baseline for training a Franka arm in Isaac Sim:
+This project uses SAC reinforcement learning algorithm on Franka.
 
 - Franka 7-DoF arm driven through Isaac ROS2 topics
-- Time-varying Cartesian targets: circle, figure-eight, or larger horizontal figure-eight
+- Time-varying Cartesian target: fixed horizontal figure-eight
 - Reinforcement learning core: custom PyTorch SAC
 - Smooth control: learned joint-velocity policy with velocity limits and command-smoothness penalties
 - Safety: optional collision penalty from Isaac contact sensors on `/collision/*`
@@ -15,58 +15,99 @@ The expected Isaac topics are:
 ```text
 /isaac_joint_states
 /isaac_joint_commands
-/collision/hand
+/collision/hand/<prim_name>
 ```
+prim_name:\
+```panda_hand```,```panda_rightfinger``` etc.
+
+## Build Environment
+### System:
+Windows 11
+- WSL2 ubuntu 22.04
+- Isaac Sim 5.1
+
+The project use the rosbridge between isaac sim and ros2.
 
 ## Install
 
-From the repository root:
+Install ROS2 first. On Ubuntu 22.04 this is typically ROS2 Humble:
 
 ```bash
-python3 -m venv .venv
+export ROS_DISTRO=humble
+```
+
+The code imports these ROS2 Python packages at runtime:
+
+```text
+rclpy
+rosidl_runtime_py
+sensor_msgs
+std_msgs
+geometry_msgs
+visualization_msgs
+tf2_ros
+```
+
+These come from ROS2/apt packages, not `pip`. If you did not install a ROS2
+desktop distribution, install the required packages with:
+
+```bash
+sudo apt install \
+  ros-$ROS_DISTRO-rclpy \
+  ros-$ROS_DISTRO-rosidl-runtime-py \
+  ros-$ROS_DISTRO-sensor-msgs \
+  ros-$ROS_DISTRO-std-msgs \
+  ros-$ROS_DISTRO-geometry-msgs \
+  ros-$ROS_DISTRO-visualization-msgs \
+  ros-$ROS_DISTRO-tf2-ros
+```
+
+Then source ROS2 before running this project:
+
+```bash
+source /opt/ros/$ROS_DISTRO/setup.bash
+```
+
+From the repository root, create a virtual environment that can still see ROS2's
+system Python packages, then install the pip dependencies:
+
+```bash
+python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+The pip dependencies are:
+
+```text
+numpy
+gymnasium
+torch
+tensorboard
+```
+
+If you need a CUDA-specific PyTorch build, install PyTorch using the command
+recommended for your CUDA version, then run `pip install -r requirements.txt`.
 
 ## Train
 
 Launch Isaac Sim first, confirm the topics exist with `ros2 topic list`, then run:
 
 ```bash
-python -m rl_tracking.training.torch_isaac --total-timesteps 200000
-```
-
-To train on the larger horizontal figure-eight:
-
-```bash
-python -m rl_tracking.training.torch_isaac \
-  --trajectory horizontal8 \
-  --total-timesteps 200000
-```
-
-The trajectory kind, center, radius, period, and unreachable stress segment are
-saved in `isaac_env_config.json` and reused by the policy runner:
-
-```bash
-python -m rl_tracking.training.torch_isaac \
-  --trajectory figure8 \
-  --trajectory-center 0.4174 0.0 0.4558 \
-  --trajectory-radius 0.08 \
-  --trajectory-period 6.0
+python -m rl_tracking.training.torch_isaac --total-timesteps 100000
 ```
 
 By default, training auto-subscribes to visible `/collision/...` component topics as
 `std_msgs/msg/Bool`, falling back to `/collision` if no component topics are visible yet.
 You can also repeat `--collision-topic` to set the list explicitly. A collision subtracts
-`--collision-penalty` from the reward, logs the component name, and terminates the current episode:
+the fixed collision penalty from the reward, logs the component name, and terminates the current episode:
 
 ```bash
 python -m rl_tracking.training.torch_isaac \
   --collision-topic /collision/hand \
   --collision-topic /collision/left_finger \
   --collision-topic /collision/right_finger \
-  --collision-msg-type std_msgs/msg/Bool \
-  --collision-penalty 20.0
+  --collision-msg-type std_msgs/msg/Bool
 ```
 
 Use `--no-terminate-on-collision` if you want collisions to reduce reward without ending the episode.
@@ -126,26 +167,10 @@ python -m rl_tracking.training.torch_isaac \
   --action-velocity-scale 1.0
 ```
 
-The reward includes a small end-effector direction term. By default it encourages
-the Panda hand-frame `+Z` axis to stay aligned with the home pose direction,
-which is approximately base-frame `-Z`, while the position and velocity tracking
-terms remain dominant:
-
-```bash
-python -m rl_tracking.training.torch_isaac \
-  --orientation-reward-weight 0.15 \
-  --orientation-target-direction 0 0 -1
-```
-
-The reward also includes a one-sided slow-motion penalty. The end effector is
-penalized only when its speed falls below one fifth of the current target
-trajectory speed; moving faster than that floor does not add reward:
-
-```bash
-python -m rl_tracking.training.torch_isaac \
-  --min-ee-speed-fraction 0.2 \
-  --slow-speed-penalty-weight 2.0
-```
+The reward includes a small end-effector direction term, a one-sided slow-motion
+penalty, collision penalty, command-size penalty, command-smoothness penalty,
+joint-limit penalty, and position/velocity tracking terms. These reward constants
+are defined in `rl_tracking/envs/isaac.py`.
 
 ## Run A Trained Policy
 
@@ -160,14 +185,13 @@ python -m rl_tracking.nodes.policy_runner --model runs/torch_isaac/final_model.p
 To test the trajectory and command topics without RL, run the kinematic runner:
 
 ```bash
-python -m rl_tracking.nodes.kinematic_runner --trajectory horizontal8
+python -m rl_tracking.nodes.kinematic_runner
 ```
 
-For the MoveIt Panda model, the default trajectory center is in `panda_link0`
+For the MoveIt Panda model, the fixed trajectory center is in `panda_link0`
 coordinates near the nominal `panda_hand` pose. The horizontal figure-eight keeps
-`z` constant at the configured center height and starts at that center. Its long
-axis runs side-to-side in the horizontal plane. The current horizontal8 size is
-smaller than the previous large version while keeping the same center.
+`z` constant at that center height and starts at that center. Its long axis runs
+side-to-side in the horizontal plane.
 The kinematic runner first moves to the nearest point on the path, then starts
 advancing along the trajectory.
 
@@ -176,17 +200,9 @@ advancing along the trajectory.
 Publish the configured target path and the moving target point as ROS2 visualization markers:
 
 ```bash
-python -m rl_tracking.nodes.trajectory_visualizer --trajectory figure8 --frame-id panda_link0
+python -m rl_tracking.nodes.trajectory_visualizer --frame-id panda_link0
 ```
 
-For the larger horizontal figure-eight:
-
-```bash
-python -m rl_tracking.nodes.trajectory_visualizer --trajectory horizontal8 --frame-id panda_link0
-```
-
-Use the same `--center`, `--radius`, `--period`, and `--unreachable` values here
-when visualizing a custom training trajectory.
 The green end-effector marker uses TF from `panda_link0` to `panda_hand` by
 default and falls back to the local FK estimate if TF is unavailable. If your
 Isaac scene does not publish TF, add a ROS2 Publish Transform Tree node for

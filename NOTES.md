@@ -51,21 +51,21 @@ Each step rewards accurate and smooth tracking:
 - penalty near joint limits
 - small exponential bonus for low tracking error
 
+Reward weights and penalty constants are module-level constants in
+`rl_tracking/envs/isaac.py`, not command-line arguments.
+
 The episode return is the sum of step rewards.
 
 ## Trajectory
 
 Targets are analytic functions of time:
 
-- `circle`: circular path in the end-effector `y-z` plane
-- `figure8`: Lissajous-style figure-eight in the `y-z` plane
 - `horizontal8`: Lissajous-style figure-eight in the `x-y` plane, centered at the nominal home end-effector pose
 
 The target state includes both desired position and desired velocity. Training,
-deployment, and visualization all use the same configurable trajectory center,
-radius, period, and optional unreachable stress segment. The default center is
-defined in the MoveIt/franka_description Panda base frame, `panda_link0`, near
-the nominal `panda_hand` pose.
+deployment, and visualization all use this fixed trajectory. The center is defined
+in the MoveIt/franka_description Panda base frame, `panda_link0`, near the nominal
+`panda_hand` pose.
 
 ## Uncertainty
 

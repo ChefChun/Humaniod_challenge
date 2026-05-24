@@ -9,13 +9,15 @@ import rclpy
 import torch
 
 from ..algorithms.sac import ReplayBuffer, SACConfig, TorchSACAgent
-from ..core.trajectories import (
-    DEFAULT_TRAJECTORY_CENTER,
-    DEFAULT_TRAJECTORY_PERIOD,
-    DEFAULT_TRAJECTORY_RADIUS,
-    TRAJECTORY_KINDS,
+from ..envs.isaac import (
+    COLLISION_PENALTY,
+    MIN_EE_SPEED_FRACTION,
+    ORIENTATION_REWARD_WEIGHT,
+    ORIENTATION_TARGET_DIRECTION,
+    SLOW_SPEED_PENALTY_WEIGHT,
+    IsaacEnvConfig,
+    IsaacFrankaTrackingEnv,
 )
-from ..envs.isaac import IsaacEnvConfig, IsaacFrankaTrackingEnv
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,17 +26,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-dir", default="runs/torch_isaac")
     parser.add_argument("--save-freq", type=int, default=10_000)
     parser.add_argument("--log-freq", type=int, default=100)
-    parser.add_argument("--trajectory", choices=TRAJECTORY_KINDS, default="figure8")
-    parser.add_argument(
-        "--trajectory-center",
-        nargs=3,
-        type=float,
-        default=DEFAULT_TRAJECTORY_CENTER,
-        metavar=("X", "Y", "Z"),
-    )
-    parser.add_argument("--trajectory-radius", type=float, default=DEFAULT_TRAJECTORY_RADIUS)
-    parser.add_argument("--trajectory-period", type=float, default=DEFAULT_TRAJECTORY_PERIOD)
-    parser.add_argument("--trajectory-unreachable", action="store_true")
     parser.add_argument("--controller-topic", default="/isaac_joint_commands")
     parser.add_argument("--joint-states-topic", default="/isaac_joint_states")
     parser.add_argument(
@@ -45,7 +36,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--collision-msg-type", default="std_msgs/msg/Bool")
     parser.add_argument("--collision-threshold", type=float, default=0.0)
-    parser.add_argument("--collision-penalty", type=float, default=20.0)
     parser.add_argument("--no-terminate-on-collision", action="store_true")
     parser.add_argument("--dt", type=float, default=0.08)
     parser.add_argument("--horizon", type=int, default=180)
@@ -53,34 +43,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--obs-noise", type=float, default=0.001)
     parser.add_argument("--action-noise", type=float, default=0.01)
     parser.add_argument("--max-joint-speed", type=float, default=0.8)
-    parser.add_argument(
-        "--orientation-reward-weight",
-        type=float,
-        default=IsaacEnvConfig.orientation_reward_weight,
-    )
-    parser.add_argument(
-        "--orientation-target-direction",
-        nargs=3,
-        type=float,
-        default=IsaacEnvConfig.orientation_target_direction,
-        metavar=("X", "Y", "Z"),
-    )
-    parser.add_argument(
-        "--min-ee-speed-fraction",
-        type=float,
-        default=IsaacEnvConfig.min_ee_speed_fraction,
-    )
-    parser.add_argument(
-        "--slow-speed-penalty-weight",
-        type=float,
-        default=IsaacEnvConfig.slow_speed_penalty_weight,
-    )
     parser.add_argument("--action-velocity-scale", type=float, default=IsaacEnvConfig.action_velocity_scale)
     parser.add_argument("--curriculum-switch-min-episodes", type=int, default=5)
     parser.add_argument("--curriculum-switch-window", type=int, default=5)
     parser.add_argument("--curriculum-switch-trajectory-error", type=float, default=0.045)
-    parser.add_argument("--trajectory-projection-samples", type=int, default=180)
-    parser.add_argument("--trajectory-projection-window", type=float, default=1.2)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--buffer-size", type=int, default=300_000)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -119,28 +85,16 @@ def main() -> None:
     env_config = IsaacEnvConfig(
         dt=args.dt,
         horizon=args.horizon,
-        trajectory=args.trajectory,
-        trajectory_center=tuple(args.trajectory_center),
-        trajectory_radius=args.trajectory_radius,
-        trajectory_period=args.trajectory_period,
-        trajectory_unreachable=args.trajectory_unreachable,
         obs_noise=args.obs_noise,
         action_noise=args.action_noise,
         action_velocity_scale=args.action_velocity_scale,
         max_joint_speed=args.max_joint_speed,
-        orientation_reward_weight=args.orientation_reward_weight,
-        orientation_target_direction=tuple(args.orientation_target_direction),
-        min_ee_speed_fraction=args.min_ee_speed_fraction,
-        slow_speed_penalty_weight=args.slow_speed_penalty_weight,
-        trajectory_projection_samples=args.trajectory_projection_samples,
-        trajectory_projection_window=args.trajectory_projection_window,
         controller_topic=args.controller_topic,
         joint_states_topic=args.joint_states_topic,
         collision_topic=collision_topics[0] if collision_topics else "/collision",
         collision_topics=collision_topics,
         collision_msg_type=args.collision_msg_type,
         collision_threshold=args.collision_threshold,
-        collision_penalty=args.collision_penalty,
         terminate_on_collision=not args.no_terminate_on_collision,
         settle_timeout=args.settle_timeout,
         seed=args.seed,
@@ -219,12 +173,13 @@ def main() -> None:
             print("Training custom PyTorch SAC on Isaac Sim Franka")
             print(f"save_dir: {save_dir}")
             print(f"device: {device}")
+            print("trajectory: fixed horizontal8")
             print(f"controller_topic: {env_config.controller_topic}")
             print(f"joint_states_topic: {env_config.joint_states_topic}")
             print(
                 f"collision_topics: {', '.join(env_config.collision_topics) if env_config.collision_topics else env_config.collision_topic + '/* auto'} "
                 f"type={env_config.collision_msg_type} "
-                f"penalty={env_config.collision_penalty} "
+                f"penalty={COLLISION_PENALTY} "
                 f"terminate={env_config.terminate_on_collision}"
             )
             print(
@@ -239,13 +194,13 @@ def main() -> None:
             )
             print(
                 "orientation reward: "
-                f"weight={env_config.orientation_reward_weight} "
-                f"target_direction={env_config.orientation_target_direction}"
+                f"weight={ORIENTATION_REWARD_WEIGHT} "
+                f"target_direction={ORIENTATION_TARGET_DIRECTION}"
             )
             print(
                 "speed floor penalty: "
-                f"min_fraction={env_config.min_ee_speed_fraction} "
-                f"weight={env_config.slow_speed_penalty_weight}"
+                f"min_fraction={MIN_EE_SPEED_FRACTION} "
+                f"weight={SLOW_SPEED_PENALTY_WEIGHT}"
             )
 
             last_losses: dict[str, float] = {}
