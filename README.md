@@ -1,5 +1,8 @@
 # Franka Isaac Sim End-Effector Tracking
 
+## Demo
+![tracking_demo](assets/tracking.gif)\
+[Watch the demo video](assets/demo.mp4)
 This project uses SAC reinforcement learning algorithm on Franka.
 
 - Franka 7-DoF arm driven through Isaac ROS2 topics
