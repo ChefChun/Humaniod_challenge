@@ -126,6 +126,16 @@ python -m rl_tracking.training.torch_isaac \
   --action-velocity-scale 1.0
 ```
 
+The reward penalizes command jumps to discourage jerky motion. The default
+smoothness penalty is intentionally stronger on the velocity-control branch,
+and phase two uses a higher default weight:
+
+```bash
+python -m rl_tracking.training.torch_isaac \
+  --smoothness-penalty-weight 0.12 \
+  --phase-two-smoothness-penalty-weight 0.24
+```
+
 The reward includes a small end-effector direction term. By default it encourages
 the Panda hand-frame `+Z` axis to stay aligned with the home pose direction,
 which is approximately base-frame `-Z`, while the position and velocity tracking
@@ -191,10 +201,9 @@ The green end-effector marker uses TF from `panda_link0` to `panda_hand` by
 default and falls back to the local FK estimate if TF is unavailable. If your
 Isaac scene does not publish TF, add a ROS2 Publish Transform Tree node for
 `/Franka` or run the visualizer with `--ee-source fk`.
-The orange moving target marker has its own clock; the kinematic runner may not
-be phase-synchronized with it because it starts from the nearest path point.
-Use the blue path for geometric tracking checks, or run the runner with
-`--start-mode fixed --approach-duration 0` when you need phase-zero comparison.
+By default, the orange moving target marker shows the next path point projected
+from the current end-effector position, matching phase-two training target
+selection. Use `--target-mode time` when you need a clock-driven target marker.
 
 The marker topic is:
 

@@ -81,7 +81,7 @@ These are CLI flags in `rl_tracking.training.torch_isaac`.
 Training logs:
 
 - mean / max Cartesian tracking error
-- RMS command delta as a smoothness metric
+- RMS command delta as a smoothness metric with a stronger phase-two default penalty
 - command, policy velocity, and IK reference velocity norms
 - success flag for low tracking error
 - TensorBoard logs and periodic SAC checkpoints

@@ -8,13 +8,15 @@ from ..core.trajectories import (
     DEFAULT_TRAJECTORY_PERIOD,
     DEFAULT_TRAJECTORY_RADIUS,
     TRAJECTORY_KINDS,
+    closest_target_on_trajectory_time,
     make_trajectory_config,
     target_at,
 )
 
 
 # Visualization data flow:
-# target_at() produces the desired path and moving target marker.
+# target_at() produces the desired path. The moving target marker can either be
+# clock-driven or projected one step ahead from the current end-effector position.
 # When TF is available, the green marker uses the actual robot end-effector frame.
 # Otherwise it falls back to the same local FK used by training and the kinematic runner.
 def parse_args() -> argparse.Namespace:
@@ -31,6 +33,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples", type=int, default=160)
     parser.add_argument("--rate-hz", type=float, default=20.0)
     parser.add_argument("--unreachable", action="store_true")
+    parser.add_argument(
+        "--target-mode",
+        choices=["current-next", "time"],
+        default="current-next",
+        help="current-next shows the next path point from the current EE position; time shows a clock-driven target.",
+    )
+    parser.add_argument("--lookahead-time", type=float, default=0.08)
     return parser.parse_args()
 
 
@@ -144,6 +153,18 @@ def main() -> None:
                     return tf_pos
             return self.fk_ee_pos
 
+        def _current_target_position(self, elapsed: float, ee_pos: np.ndarray | None) -> np.ndarray:
+            if args.target_mode == "current-next" and ee_pos is not None:
+                _, _, _, _, target_time = closest_target_on_trajectory_time(
+                    ee_pos,
+                    cfg,
+                    samples=max(args.samples, 2),
+                )
+                target_pos, _, _ = target_at(target_time + args.lookahead_time, cfg)
+                return target_pos
+            target_pos, _, _ = target_at(elapsed, cfg)
+            return target_pos
+
         def _base_marker(self, marker_id: int, marker_type: int) -> Marker:
             # RViz/Isaac identify markers by namespace and id; reusing ids updates old markers.
             marker = Marker()
@@ -159,7 +180,8 @@ def main() -> None:
 
         def publish_markers(self) -> None:
             elapsed = (self.get_clock().now() - self.start_time).nanoseconds * 1e-9
-            target_pos, _, _ = target_at(elapsed, cfg)
+            ee_pos = self._current_ee_position()
+            target_pos = self._current_target_position(elapsed, ee_pos)
 
             # Blue: full desired target path.
             path = self._base_marker(0, Marker.LINE_STRIP)
@@ -184,7 +206,6 @@ def main() -> None:
             target.color.a = 0.95
 
             markers = [path, target]
-            ee_pos = self._current_ee_position()
             if ee_pos is not None:
                 # Green: current end-effector position from TF, or FK fallback.
                 ee = self._base_marker(2, Marker.SPHERE)

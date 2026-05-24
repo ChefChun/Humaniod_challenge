@@ -75,6 +75,16 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=IsaacEnvConfig.slow_speed_penalty_weight,
     )
+    parser.add_argument(
+        "--smoothness-penalty-weight",
+        type=float,
+        default=IsaacEnvConfig.smoothness_penalty_weight,
+    )
+    parser.add_argument(
+        "--phase-two-smoothness-penalty-weight",
+        type=float,
+        default=IsaacEnvConfig.phase_two_smoothness_penalty_weight,
+    )
     parser.add_argument("--action-velocity-scale", type=float, default=IsaacEnvConfig.action_velocity_scale)
     parser.add_argument("--curriculum-switch-min-episodes", type=int, default=5)
     parser.add_argument("--curriculum-switch-window", type=int, default=5)
@@ -132,6 +142,8 @@ def main() -> None:
         orientation_target_direction=tuple(args.orientation_target_direction),
         min_ee_speed_fraction=args.min_ee_speed_fraction,
         slow_speed_penalty_weight=args.slow_speed_penalty_weight,
+        smoothness_penalty_weight=args.smoothness_penalty_weight,
+        phase_two_smoothness_penalty_weight=args.phase_two_smoothness_penalty_weight,
         trajectory_projection_samples=args.trajectory_projection_samples,
         trajectory_projection_window=args.trajectory_projection_window,
         controller_topic=args.controller_topic,
@@ -187,6 +199,7 @@ def main() -> None:
                 "episode_length",
                 "reward",
                 "tracking_error",
+                "desired_error",
                 "timed_error",
                 "trajectory_error",
                 "velocity_toward_path",
@@ -200,6 +213,8 @@ def main() -> None:
                 "orientation_reward",
                 "smoothness",
                 "command_delta_norm",
+                "smoothness_penalty_weight",
+                "smoothness_penalty",
                 "in_collision",
                 "collision_components",
                 "collision_magnitude",
@@ -233,7 +248,7 @@ def main() -> None:
                 f"action_velocity_scale={env_config.action_velocity_scale}"
             )
             print(
-                "reward curriculum: trajectory-path reward first, timed target reward after "
+                "reward curriculum: trajectory-path reward first, projected phase-two target after "
                 f"{args.curriculum_switch_window} recent episode(s) average trajectory error "
                 f"< {args.curriculum_switch_trajectory_error}"
             )
@@ -246,6 +261,11 @@ def main() -> None:
                 "speed floor penalty: "
                 f"min_fraction={env_config.min_ee_speed_fraction} "
                 f"weight={env_config.slow_speed_penalty_weight}"
+            )
+            print(
+                "smoothness penalty: "
+                f"phase1_weight={env_config.smoothness_penalty_weight} "
+                f"phase2_weight={env_config.phase_two_smoothness_penalty_weight}"
             )
 
             last_losses: dict[str, float] = {}
@@ -276,6 +296,7 @@ def main() -> None:
 
                 if writer is not None:
                     writer.add_scalar("tracking/error_m", info.get("error", 0.0), step)
+                    writer.add_scalar("tracking/desired_error_m", info.get("desired_error", 0.0), step)
                     writer.add_scalar("tracking/timed_error_m", info.get("timed_error", 0.0), step)
                     writer.add_scalar("tracking/trajectory_error_m", info.get("trajectory_error", 0.0), step)
                     writer.add_scalar("tracking/velocity_toward_path", info.get("velocity_toward_path", 0.0), step)
@@ -292,6 +313,12 @@ def main() -> None:
                     )
                     writer.add_scalar("tracking/smoothness", info.get("smoothness", 0.0), step)
                     writer.add_scalar("tracking/command_delta_norm", info.get("command_delta_norm", 0.0), step)
+                    writer.add_scalar(
+                        "penalty/smoothness_weight",
+                        info.get("smoothness_penalty_weight", 0.0),
+                        step,
+                    )
+                    writer.add_scalar("penalty/smoothness", info.get("smoothness_penalty", 0.0), step)
                     writer.add_scalar("safety/in_collision", float(info.get("in_collision", False)), step)
                     writer.add_scalar("safety/collision_magnitude", info.get("collision_magnitude", 0.0), step)
                     writer.add_scalar("reward/collision_penalty", info.get("collision_penalty", 0.0), step)
@@ -323,6 +350,7 @@ def main() -> None:
                         "episode_length": episode_length,
                         "reward": reward,
                         "tracking_error": info.get("error", 0.0),
+                        "desired_error": info.get("desired_error", 0.0),
                         "timed_error": info.get("timed_error", 0.0),
                         "trajectory_error": info.get("trajectory_error", 0.0),
                         "velocity_toward_path": info.get("velocity_toward_path", 0.0),
@@ -336,6 +364,8 @@ def main() -> None:
                         "orientation_reward": info.get("orientation_reward", 0.0),
                         "smoothness": info.get("smoothness", 0.0),
                         "command_delta_norm": info.get("command_delta_norm", 0.0),
+                        "smoothness_penalty_weight": info.get("smoothness_penalty_weight", 0.0),
+                        "smoothness_penalty": info.get("smoothness_penalty", 0.0),
                         "in_collision": int(bool(info.get("in_collision", False))),
                         "collision_components": ",".join(info.get("collision_components", [])),
                         "collision_magnitude": info.get("collision_magnitude", 0.0),
@@ -388,10 +418,12 @@ def main() -> None:
                         if can_switch:
                             reward_mode = "timed"
                             env.set_reward_mode("timed")
+                            if writer is not None:
+                                writer.add_scalar("curriculum/phase", 2.0, step)
                             print(
-                                "Curriculum switched to timed target reward "
-                                f"after episode {episode_idx}; mean trajectory error "
-                                f"{float(np.mean(recent_episode_trajectory_errors)):.4f}"
+                                "Phase two training enabled after episode "
+                                f"{episode_idx}; target is projected from current EE position; "
+                                f"mean trajectory error {float(np.mean(recent_episode_trajectory_errors)):.4f}"
                             )
                     episode_idx += 1
                     obs, _ = env.reset(seed=args.seed + episode_idx)
