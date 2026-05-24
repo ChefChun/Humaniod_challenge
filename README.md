@@ -5,7 +5,7 @@ This folder contains a focused SAC baseline for training a Franka arm in Isaac S
 - Franka 7-DoF arm driven through Isaac ROS2 topics
 - Time-varying Cartesian targets: circle, figure-eight, or larger horizontal figure-eight
 - Reinforcement learning core: custom PyTorch SAC
-- Smooth control: learned joint-acceleration policy with velocity, acceleration, and jerk limits
+- Smooth control: learned joint-velocity policy with velocity limits and command-smoothness penalties
 - Safety: optional collision penalty from Isaac contact sensors on `/collision/*`
 - Uncertainty: observation and action noise
 - Metrics: tracking error, end-effector speed, orientation alignment, command smoothness, and success flag logged to TensorBoard
@@ -88,7 +88,7 @@ runs/torch_isaac/final_model.pt
 ```
 
 The PyTorch trainer owns the actor, twin critics, target critics, replay buffer, entropy temperature, and update loop.
-The SAC actor outputs normalized joint acceleration commands. The controller clips acceleration, applies a jerk limit, integrates to joint velocity and joint position, then publishes a `sensor_msgs/msg/JointState` command.
+The SAC actor outputs normalized joint-velocity commands. The controller scales the action by the configured joint-speed limit, clips the final velocity, integrates it to a desired joint position, then publishes a `sensor_msgs/msg/JointState` command.
 
 ## Visualize Training
 
@@ -118,14 +118,12 @@ python -m rl_tracking.training.torch_isaac \
   --joint-states-topic /isaac_joint_states
 ```
 
-Acceleration-control limits can be tuned with:
+Velocity-control limits can be tuned with:
 
 ```bash
 python -m rl_tracking.training.torch_isaac \
   --max-joint-speed 0.8 \
-  --max-joint-accel 2.5 \
-  --max-joint-jerk 18.0 \
-  --residual-scale 0.35
+  --action-velocity-scale 1.0
 ```
 
 The reward includes a small end-effector direction term. By default it encourages

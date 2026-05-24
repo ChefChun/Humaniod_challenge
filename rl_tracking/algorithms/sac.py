@@ -86,7 +86,7 @@ class TrackingEncoder(nn.Module):
         robot_features = self.robot_encoder(obs[:, 0:14])
         # obs[:, 14:28] = EE/target position, target velocity, target error, phase.
         tracking_features = self.tracking_encoder(obs[:, 14:28])
-        # obs[:, 28:35] = previous joint acceleration, used to learn smoother commands.
+        # obs[:, 28:35] = previous joint velocity command, used to learn smoother commands.
         command_features = self.command_encoder(obs[:, 28:35])
         return self.fusion(torch.cat([robot_features, tracking_features, command_features], dim=-1))
 

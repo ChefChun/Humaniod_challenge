@@ -53,8 +53,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--obs-noise", type=float, default=0.001)
     parser.add_argument("--action-noise", type=float, default=0.01)
     parser.add_argument("--max-joint-speed", type=float, default=0.8)
-    parser.add_argument("--max-joint-accel", type=float, default=2.5)
-    parser.add_argument("--max-joint-jerk", type=float, default=18.0)
     parser.add_argument(
         "--orientation-reward-weight",
         type=float,
@@ -77,8 +75,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=IsaacEnvConfig.slow_speed_penalty_weight,
     )
-    parser.add_argument("--action-accel-scale", type=float, default=1.0)
-    parser.add_argument("--residual-scale", type=float)
+    parser.add_argument("--action-velocity-scale", type=float, default=IsaacEnvConfig.action_velocity_scale)
     parser.add_argument("--curriculum-switch-min-episodes", type=int, default=5)
     parser.add_argument("--curriculum-switch-window", type=int, default=5)
     parser.add_argument("--curriculum-switch-trajectory-error", type=float, default=0.045)
@@ -129,10 +126,8 @@ def main() -> None:
         trajectory_unreachable=args.trajectory_unreachable,
         obs_noise=args.obs_noise,
         action_noise=args.action_noise,
-        action_accel_scale=args.action_accel_scale if args.residual_scale is None else args.residual_scale,
+        action_velocity_scale=args.action_velocity_scale,
         max_joint_speed=args.max_joint_speed,
-        max_joint_accel=args.max_joint_accel,
-        max_joint_jerk=args.max_joint_jerk,
         orientation_reward_weight=args.orientation_reward_weight,
         orientation_target_direction=tuple(args.orientation_target_direction),
         min_ee_speed_fraction=args.min_ee_speed_fraction,
@@ -204,14 +199,15 @@ def main() -> None:
                 "orientation_alignment",
                 "orientation_reward",
                 "smoothness",
-                "jerk_norm",
+                "command_delta_norm",
                 "in_collision",
                 "collision_components",
                 "collision_magnitude",
                 "collision_count",
                 "collision_penalty",
                 "command_velocity_norm",
-                "acceleration_norm",
+                "policy_velocity_norm",
+                "reference_velocity_norm",
                 "actor_loss",
                 "critic1_loss",
                 "critic2_loss",
@@ -232,11 +228,9 @@ def main() -> None:
                 f"terminate={env_config.terminate_on_collision}"
             )
             print(
-                "control: RL acceleration policy "
+                "control: RL policy outputs full joint velocity "
                 f"max_speed={env_config.max_joint_speed} "
-                f"max_accel={env_config.max_joint_accel} "
-                f"max_jerk={env_config.max_joint_jerk} "
-                f"action_scale={env_config.action_accel_scale}"
+                f"action_velocity_scale={env_config.action_velocity_scale}"
             )
             print(
                 "reward curriculum: trajectory-path reward first, timed target reward after "
@@ -297,7 +291,7 @@ def main() -> None:
                         step,
                     )
                     writer.add_scalar("tracking/smoothness", info.get("smoothness", 0.0), step)
-                    writer.add_scalar("tracking/jerk_norm", info.get("jerk_norm", 0.0), step)
+                    writer.add_scalar("tracking/command_delta_norm", info.get("command_delta_norm", 0.0), step)
                     writer.add_scalar("safety/in_collision", float(info.get("in_collision", False)), step)
                     writer.add_scalar("safety/collision_magnitude", info.get("collision_magnitude", 0.0), step)
                     writer.add_scalar("reward/collision_penalty", info.get("collision_penalty", 0.0), step)
@@ -308,8 +302,13 @@ def main() -> None:
                         step,
                     )
                     writer.add_scalar(
-                        "control/acceleration_norm",
-                        float(np.linalg.norm(info.get("acceleration", np.zeros(7)))),
+                        "control/policy_velocity_norm",
+                        float(np.linalg.norm(info.get("policy_velocity", np.zeros(7)))),
+                        step,
+                    )
+                    writer.add_scalar(
+                        "control/reference_velocity_norm",
+                        float(np.linalg.norm(info.get("reference_velocity", np.zeros(7)))),
                         step,
                     )
                     writer.add_scalar("train/reward", reward, step)
@@ -336,14 +335,15 @@ def main() -> None:
                         "orientation_alignment": info.get("orientation_alignment", 0.0),
                         "orientation_reward": info.get("orientation_reward", 0.0),
                         "smoothness": info.get("smoothness", 0.0),
-                        "jerk_norm": info.get("jerk_norm", 0.0),
+                        "command_delta_norm": info.get("command_delta_norm", 0.0),
                         "in_collision": int(bool(info.get("in_collision", False))),
                         "collision_components": ",".join(info.get("collision_components", [])),
                         "collision_magnitude": info.get("collision_magnitude", 0.0),
                         "collision_count": info.get("collision_count", 0),
                         "collision_penalty": info.get("collision_penalty", 0.0),
                         "command_velocity_norm": float(np.linalg.norm(info.get("command_velocity", np.zeros(7)))),
-                        "acceleration_norm": float(np.linalg.norm(info.get("acceleration", np.zeros(7)))),
+                        "policy_velocity_norm": float(np.linalg.norm(info.get("policy_velocity", np.zeros(7)))),
+                        "reference_velocity_norm": float(np.linalg.norm(info.get("reference_velocity", np.zeros(7)))),
                         "actor_loss": last_losses.get("actor_loss", 0.0),
                         "critic1_loss": last_losses.get("critic1_loss", 0.0),
                         "critic2_loss": last_losses.get("critic2_loss", 0.0),

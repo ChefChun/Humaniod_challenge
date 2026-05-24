@@ -35,11 +35,11 @@ The main trainer is `rl_tracking.training.torch_isaac`. It uses a custom PyTorch
 
 ## Action
 
-The SAC policy outputs a 7D residual joint-velocity command in `[-1, 1]`.
+The SAC policy outputs a normalized 7D joint-velocity command in `[-1, 1]`.
 
-The simulator computes a smooth damped-least-squares velocity IK command from Cartesian error and target velocity. The RL residual is added to this base command, then the final joint velocity is clipped and optionally delayed/noised.
+The simulator scales that action by the configured joint-speed limit and sends it as the commanded joint velocity. Damped least-squares IK is not part of the command path on this branch; it is only useful as a diagnostic/reference signal.
 
-This keeps early training stable while still making reinforcement learning a core component of tracking behavior.
+This makes reinforcement learning fully responsible for choosing the robot velocity command.
 
 ## Reward
 
@@ -76,14 +76,12 @@ Supported uncertainty sources:
 
 These are CLI flags in `rl_tracking.training.torch_isaac`.
 
-On the `acc` branch, the policy output is interpreted as a normalized joint acceleration residual. The controller adds it to the acceleration needed to track the damped-IK velocity target, clips acceleration, applies a jerk limit, then integrates to commanded joint velocity and joint position. This keeps the learned policy responsive while reducing abrupt command changes before they reach the robot.
-
 ## Evaluation
 
 Training logs:
 
 - mean / max Cartesian tracking error
 - RMS command delta as a smoothness metric
-- acceleration and jerk metrics
+- command, policy velocity, and IK reference velocity norms
 - success flag for low tracking error
 - TensorBoard logs and periodic SAC checkpoints

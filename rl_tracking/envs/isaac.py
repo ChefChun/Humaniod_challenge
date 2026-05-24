@@ -5,7 +5,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from ..core.control import integrate_joint_acceleration, policy_acceleration_command
+from ..core.control import integrate_joint_velocity, policy_velocity_command
 from ..core.kinematics import (
     PANDA_HOME_EE_DIRECTION,
     PANDA_JOINT_NAMES,
@@ -33,27 +33,28 @@ from ..core.trajectories import (
 # 1. Isaac Sim publishes /isaac_joint_states as sensor_msgs/JointState.
 # 2. Isaac contact sensors publish /collision/*; _collision_cb stores which components are unsafe.
 # 3. _joint_state_cb stores those joint positions/velocities in self.q and self.qd.
-# 4. make_observation packs robot state, target state, tracking error, and previous acceleration.
+# 4. make_observation packs robot state, target state, tracking error, and previous velocity command.
 # 5. SAC reads that observation and outputs a normalized 7D action.
-# 6. step() treats that action as the main joint acceleration command, integrates to velocity/position,
-#    then publishes /isaac_joint_commands back to Isaac Sim.
+# 6. step() treats that action as the full joint-velocity command, then publishes
+#    /isaac_joint_commands back to Isaac Sim.
 def make_observation(
     q: np.ndarray,
     qd: np.ndarray,
-    prev_action: np.ndarray,
+    prev_command: np.ndarray,
     ee_pos: np.ndarray,
     target_pos: np.ndarray,
     target_vel: np.ndarray,
     phase: float,
     noise_std: float = 0.0,
-    prev_action_scale: float = 1.5,
+    prev_command_scale: float = 1.0,
     rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     q_center = 0.5 * (PANDA_Q_MAX + PANDA_Q_MIN)
     q_halfspan = 0.5 * (PANDA_Q_MAX - PANDA_Q_MIN)
+    prev_command_scale = max(float(prev_command_scale), 1e-6)
     # Keep this ordering aligned with TrackingEncoder in algorithms/sac.py:
     # [normalized joints, joint velocities, EE position, target position,
-    #  target velocity, target error, trajectory phase, previous acceleration].
+    #  target velocity, target error, trajectory phase, previous velocity command].
     obs = np.concatenate(
         [
             (q - q_center) / q_halfspan,
@@ -63,7 +64,7 @@ def make_observation(
             target_vel,
             target_pos - ee_pos,
             np.array([np.sin(phase), np.cos(phase)]),
-            prev_action / prev_action_scale,
+            prev_command / prev_command_scale,
         ]
     ).astype(float)
 
@@ -83,10 +84,8 @@ class IsaacEnvConfig:
     trajectory_unreachable: bool = False
     obs_noise: float = 0.001
     action_noise: float = 0.01
-    action_accel_scale: float = 1.0
+    action_velocity_scale: float = 1.0
     max_joint_speed: float = 0.8
-    max_joint_accel: float = 2.5
-    max_joint_jerk: float = 18.0
     orientation_reward_weight: float = 0.15
     orientation_target_direction: tuple[float, float, float] = PANDA_HOME_EE_DIRECTION
     min_ee_speed_fraction: float = 0.2
@@ -233,14 +232,19 @@ class IsaacFrankaTrackingEnv(gym.Env):
 
         self.q: np.ndarray | None = None
         self.qd = np.zeros(7, dtype=float)
-        self.command_velocity = np.zeros(7, dtype=float)
-        self.prev_acceleration = np.zeros(7, dtype=float)
+        self.prev_command = np.zeros(7, dtype=float)
         self.reward_mode = "trajectory"
         self.tracking_start_time: float | None = None
         self.path_time_estimate: float | None = None
         self.step_count = 0
         self.t = 0.0
         self.trajectory_cfg = self._make_trajectory_config()
+        if config.dt <= 0.0:
+            raise ValueError("dt must be positive")
+        if config.max_joint_speed <= 0.0:
+            raise ValueError("max_joint_speed must be positive")
+        if config.action_velocity_scale < 0.0:
+            raise ValueError("action_velocity_scale must be non-negative")
         if config.orientation_reward_weight < 0.0:
             raise ValueError("orientation_reward_weight must be non-negative")
         if config.min_ee_speed_fraction < 0.0:
@@ -451,13 +455,13 @@ class IsaacFrankaTrackingEnv(gym.Env):
         obs = make_observation(
             self.q,
             self.qd,
-            self.prev_acceleration,
+            self.prev_command,
             ee_pos,
             target_pos,
             target_vel,
             phase,
             noise_std=self.config.obs_noise,
-            prev_action_scale=self.config.max_joint_accel,
+            prev_command_scale=self.config.max_joint_speed,
             rng=self.rng,
         )
         return obs.astype(np.float32)
@@ -474,8 +478,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
 
         self.step_count = 0
         self.t = 0.0
-        self.command_velocity = np.zeros(7, dtype=float)
-        self.prev_acceleration = np.zeros(7, dtype=float)
+        self.prev_command = np.zeros(7, dtype=float)
         self.collision_states = {component: False for component in self.collision_components}
         self.collision_magnitudes = {component: 0.0 for component in self.collision_components}
         self.collision_event_counts = {component: 0 for component in self.collision_components}
@@ -510,34 +513,27 @@ class IsaacFrankaTrackingEnv(gym.Env):
         else:
             target_pos, target_vel, _ = self._target()
         error_vec = target_pos - ee_pos
-        # IK is diagnostic/reference only on this branch; SAC supplies the actual acceleration command.
         reference_velocity = damped_velocity_ik(
             self.q,
             error_vec,
             target_vel,
             max_joint_speed=self.config.max_joint_speed,
         )
-        desired_acceleration = policy_acceleration_command(
+        command_velocity = policy_velocity_command(
             action,
-            self.config.max_joint_accel,
-            self.config.action_accel_scale,
-        )
-        # The command sent to Isaac is still JointState(position, velocity); acceleration is
-        # an internal control signal integrated over dt to get those publishable quantities.
-        desired_q, command_velocity, acceleration, acceleration_delta = integrate_joint_acceleration(
-            self.q,
-            self.command_velocity,
-            self.prev_acceleration,
-            desired_acceleration,
-            self.config.dt,
             self.config.max_joint_speed,
-            self.config.max_joint_accel,
-            self.config.max_joint_jerk,
+            self.config.action_velocity_scale,
         )
+        policy_velocity = command_velocity.copy()
+        desired_q, command_velocity = integrate_joint_velocity(
+            self.q,
+            command_velocity,
+            self.config.dt,
+        )
+        command_delta = command_velocity - self.prev_command
         self._publish_position_command(desired_q, command_velocity)
         self._spin_for(self.config.dt)
 
-        self.command_velocity = command_velocity
         self.t += self.config.dt
         self.step_count += 1
 
@@ -587,8 +583,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
             self.config.min_ee_speed_fraction,
             self.config.slow_speed_penalty_weight,
         )
-        smoothness = float(np.linalg.norm(acceleration_delta))
-        jerk_norm = smoothness / self.config.dt
+        smoothness = float(np.linalg.norm(command_delta))
         limit_penalty = joint_limit_cost(self.q)
         ee_direction = hand_z_axis(self.q)
         orientation_alignment = float(
@@ -614,7 +609,6 @@ class IsaacFrankaTrackingEnv(gym.Env):
             position_reward
             + velocity_reward
             - 0.01 * float(np.dot(command_velocity, command_velocity))
-            - 0.015 * float(np.dot(acceleration, acceleration))
             - 0.05 * smoothness
             - 6.0 * limit_penalty
             + orientation_reward
@@ -622,7 +616,7 @@ class IsaacFrankaTrackingEnv(gym.Env):
             - collision_penalty
         )
 
-        self.prev_acceleration = acceleration.copy()
+        self.prev_command = command_velocity.copy()
         terminated = self.config.terminate_on_collision and step_collision
         truncated = self.step_count >= self.config.horizon
         info = {
@@ -649,9 +643,9 @@ class IsaacFrankaTrackingEnv(gym.Env):
             "orientation_target_direction": self.orientation_target_direction,
             "ee_velocity": ee_velocity,
             "smoothness": smoothness,
-            "jerk_norm": jerk_norm,
+            "command_delta_norm": smoothness,
+            "policy_velocity": policy_velocity,
             "reference_velocity": reference_velocity,
-            "acceleration": acceleration,
             "command_velocity": command_velocity,
             "command": command_velocity,
             "in_collision": step_collision,

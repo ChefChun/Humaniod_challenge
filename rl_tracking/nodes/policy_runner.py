@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from ..algorithms.sac import TorchSACAgent
-from ..core.control import integrate_joint_acceleration, policy_acceleration_command
+from ..core.control import integrate_joint_velocity, policy_velocity_command
 from ..core.kinematics import PANDA_JOINT_NAMES, forward_kinematics
 from ..core.trajectories import (
     DEFAULT_TRAJECTORY_CENTER,
@@ -21,8 +21,8 @@ from ..envs.isaac import make_observation
 
 # Runtime data flow after training:
 # Isaac publishes joint states -> this node builds the same observation used during training ->
-# the saved SAC actor predicts residual acceleration -> control.py integrates it into desired
-# joint position/velocity -> this node publishes JointState commands back to Isaac.
+# the saved SAC actor predicts the full joint velocity -> this node publishes
+# JointState commands back to Isaac.
 def load_env_config(path: Path | None, model_path: Path) -> dict:
     if path is None:
         for candidate in [
@@ -50,10 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trajectory-period", type=float)
     parser.add_argument("--trajectory-unreachable", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--max-joint-speed", type=float)
-    parser.add_argument("--max-joint-accel", type=float)
-    parser.add_argument("--max-joint-jerk", type=float)
-    parser.add_argument("--action-accel-scale", type=float)
-    parser.add_argument("--residual-scale", type=float)
+    parser.add_argument("--action-velocity-scale", type=float)
     return parser.parse_args()
 
 
@@ -103,13 +100,9 @@ def main() -> None:
         ),
     )
     max_joint_speed = args.max_joint_speed if args.max_joint_speed is not None else float(env_config.get("max_joint_speed", 0.8))
-    max_joint_accel = args.max_joint_accel if args.max_joint_accel is not None else float(env_config.get("max_joint_accel", 2.5))
-    max_joint_jerk = args.max_joint_jerk if args.max_joint_jerk is not None else float(env_config.get("max_joint_jerk", 18.0))
-    action_accel_scale = args.action_accel_scale
-    if action_accel_scale is None:
-        action_accel_scale = args.residual_scale
-    if action_accel_scale is None:
-        action_accel_scale = float(env_config.get("action_accel_scale", env_config.get("residual_scale", 1.0)))
+    action_velocity_scale = args.action_velocity_scale
+    if action_velocity_scale is None:
+        action_velocity_scale = float(env_config.get("action_velocity_scale", 1.0))
 
     class TrackerNode(Node):
         def __init__(self) -> None:
@@ -118,9 +111,7 @@ def main() -> None:
             self.subscription = self.create_subscription(JointState, args.joint_states_topic, self.on_joint_state, 10)
             self.q: np.ndarray | None = None
             self.qd = np.zeros(7)
-            self.command_velocity = np.zeros(7)
-            self.prev_acceleration = np.zeros(7)
-            self.initialized = False
+            self.prev_command = np.zeros(7)
             self.start_time = self.get_clock().now()
 
         def on_joint_state(self, msg: JointState) -> None:
@@ -132,10 +123,6 @@ def main() -> None:
 
             self.q = np.array([positions[name] for name in PANDA_JOINT_NAMES], dtype=float)
             self.qd = np.array([velocities.get(name, 0.0) for name in PANDA_JOINT_NAMES], dtype=float)
-            if not self.initialized:
-                # Start integration from measured velocity to avoid a command discontinuity on first state.
-                self.command_velocity = np.clip(self.qd, -max_joint_speed, max_joint_speed)
-                self.initialized = True
             self.publish_command()
 
         def publish_command(self) -> None:
@@ -147,32 +134,25 @@ def main() -> None:
             obs = make_observation(
                 self.q,
                 self.qd,
-                self.prev_acceleration,
+                self.prev_command,
                 ee_pos,
                 target_pos,
                 target_vel,
                 phase,
-                prev_action_scale=max_joint_accel,
+                prev_command_scale=max_joint_speed,
             ).astype(np.float32)
-            residual = policy.predict(obs)
-            # Deployment mirrors IsaacFrankaTrackingEnv.step: SAC action is the main acceleration command.
-            desired_acceleration = policy_acceleration_command(
-                residual,
-                max_joint_accel,
-                action_accel_scale,
-            )
-            desired_q, command_velocity, acceleration, _ = integrate_joint_acceleration(
-                self.q,
-                self.command_velocity,
-                self.prev_acceleration,
-                desired_acceleration,
-                args.dt,
+            action = policy.predict(obs)
+            command_velocity = policy_velocity_command(
+                action,
                 max_joint_speed,
-                max_joint_accel,
-                max_joint_jerk,
+                action_velocity_scale,
             )
-            self.command_velocity = command_velocity
-            self.prev_acceleration = acceleration
+            desired_q, command_velocity = integrate_joint_velocity(
+                self.q,
+                command_velocity,
+                args.dt,
+            )
+            self.prev_command = command_velocity
 
             # ROS2 message boundary: Isaac receives these arrays by joint name.
             msg = JointState()
