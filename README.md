@@ -41,6 +41,8 @@ The project use the rosbridge between isaac sim and ros2.
 
 ## Install
 
+The Isaac Sim usd file is in directory [`franka_isaac_sim`](franka_isaac_sim/franka.usd). Enable ros2 bridge plugin in isaas sim then import the usd file and start simulation.
+
 Install ROS2 first. On Ubuntu 22.04 this is typically ROS2 Humble:
 
 ```bash
