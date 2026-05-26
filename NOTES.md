@@ -37,6 +37,14 @@ Live Isaac Sim training uses `rl_tracking.training.torch_isaac`. The environment
 
 The main trainer is `rl_tracking.training.torch_isaac`. It uses a custom PyTorch observation encoder that processes robot state, target/error state, and previous command separately before the SAC actor and critic heads.
 
+### Two-Phase Training
+The training process has two phases:
+- Phase 1: trajectory tracking
+In the first phase of training the rl agent focus more on guiding the end effector to stay on the given trajectory.
+
+- Phase 2: Motion tracking
+After the threshold set for trajectory satisfaction evaluation is reached, the training switches to this phase, which focus more on tracking the desired pose of the end effector at certain time. A desired position on the trajectory is being updated periodically on the trajectory, and the end effector is rewarded more if it can keep up with the desired position. 
+
 ## Uncertainty
 
 Supported uncertainty sources:
@@ -71,6 +79,10 @@ Reward weights and penalty constants are constants in
 `rl_tracking/envs/isaac.py`
 
 The episode return is the sum of step rewards.
+
+### Reward for Orientation
+I added orientation of the end effector as a reward for two reasons. The first reason is that it would look better if the end effector is pointing downwards, as in the real world scenario it might be picking something.
+The second reason is that encouraging the end effector to be pointing to a fixed direction can reduce some complexity, or reduce self-collision. This is out of instinct, I got a feeling for this and it turns out to be working perfectly.
 
 ## Trajectory
 
